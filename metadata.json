@@ -1,0 +1,8 @@
+{
+  "name": "Remix Relay Terminal",
+  "description": "Phone-native developer control plane for a paired Windows PC with offline intent queuing, ANSI terminal, and AI CLI manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

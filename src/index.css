@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: #0f1115;
+    --surface-base: #16181d;
+    --surface-elevated: #1e2128;
+    --surface-hover: #262932;
+    --border-subtle: #272a33;
+    --border-strong: #363b47;
+    --accent-primary: #3b82f6;
+    --accent-hover: #2563eb;
+    --text-primary: #f1f3f7;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --status-success: #10b981;
+    --status-warning: #f59e0b;
+    --status-error: #ef4444;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: #0f1115;
+    color: #e5e7eb;
+    overflow-x: hidden;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+}
+
+/* Custom terminal & panel scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #121418;
+}
+::-webkit-scrollbar-thumb {
+  background: #282c35;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #373c47;
+}
+
+/* Blinking terminal cursor */
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.terminal-cursor {
+  animation: blink 1s infinite;
+}
