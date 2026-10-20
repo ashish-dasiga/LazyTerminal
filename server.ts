@@ -13,6 +13,10 @@ const distPath = path.join(__dirname, 'dist');
 
 app.use(express.json());
 
+// Shreya's Subsystem: AI Coding CLI, Run/Debug, and Preview endpoints
+import { shreyaRouter } from './src/server/shreyaRouter';
+app.use('/api/v1', shreyaRouter);
+
 // Serve static assets from dist
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
