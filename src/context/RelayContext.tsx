@@ -13,6 +13,7 @@ import {
   MobileNavSection,
 } from '../types/relay';
 import { executeCommandOnDaemon } from '../services/mockDaemon';
+import { getBackendAdapter, WindowsHostConnectionClient } from '../services';
 
 export const DEFAULT_USER: UserAccount = {
   id: 'usr_dev_7701',
@@ -567,15 +568,66 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     return acc;
   }, {});
 
+  // Sync initial pairing key from the local Windows PC companion on startup
+  useEffect(() => {
+    let cancelled = false;
+    const syncHostKey = async () => {
+      const adapter = getBackendAdapter();
+      if (adapter.connection instanceof WindowsHostConnectionClient) {
+        try {
+          const keyEnvelope = await adapter.connection.fetchActiveHostKey();
+          if (!cancelled && keyEnvelope.pairingKey) {
+            setGeneratedConnectionKey(keyEnvelope.pairingKey);
+            setDevice((prev) => ({
+              ...prev,
+              isOnline: true,
+              backendServerStatus: 'running',
+              pairingToken: keyEnvelope.pairingKey,
+            }));
+          }
+        } catch {
+          if (!cancelled) {
+            setDevice((prev) => ({
+              ...prev,
+              isOnline: false,
+              backendServerStatus: 'stopped',
+              tunnelStatus: 'idle',
+            }));
+          }
+        }
+      }
+    };
+    syncHostKey();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Regenerate random connection key for Windows PC
   const regenerateConnectionKey = useCallback(() => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock) {
+      adapter.connection
+        .generateHostKey()
+        .then((res) => {
+          setGeneratedConnectionKey(res.pairingKey);
+          setDevice((prev) => ({ ...prev, pairingToken: res.pairingKey }));
+        })
+        .catch((err) => {
+          setConnectionError(
+            err instanceof Error ? err.message : 'Failed to regenerate key on Windows host.'
+          );
+        });
+      return generatedConnectionKey;
+    }
+
     const d1 = Math.floor(100 + Math.random() * 900);
     const d2 = Math.floor(100 + Math.random() * 900);
     const key = `${d1}-${d2}`;
     setGeneratedConnectionKey(key);
     setDevice((prev) => ({ ...prev, pairingToken: key }));
     return key;
-  }, []);
+  }, [generatedConnectionKey]);
 
   // Login handler
   const loginUser = useCallback(async (email: string, _pass: string) => {
@@ -593,6 +645,41 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const connectWithKey = useCallback(async (key: string) => {
     setConnectionError(null);
     setConnectionStep('connecting');
+
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock) {
+      try {
+        const res = await adapter.connection.connectToHost({ pairingKey: key });
+        if (res.success) {
+          setDevice((prev) => ({
+            ...prev,
+            ...res.device,
+            pairingToken: generatedConnectionKey,
+            isOnline: true,
+            backendServerStatus: 'running',
+            tunnelStatus: 'active',
+          }));
+          setConnectionStep('connected');
+          setMobileNav('terminal');
+          return true;
+        }
+        setConnectionStep('enter_key');
+        setConnectionError(
+          res.errorMessage ||
+            `Incorrect token number "${key}". Please check the current 6-digit key displayed on your Windows PC.`
+        );
+        return false;
+      } catch (err) {
+        setConnectionStep('enter_key');
+        setConnectionError(
+          err instanceof Error
+            ? err.message
+            : 'Windows PC companion is unreachable. Start the host companion and try again.'
+        );
+        return false;
+      }
+    }
+
     await new Promise((r) => setTimeout(r, 600));
 
     // Normalize keys: strip dashes and spaces, lowercase
@@ -615,6 +702,10 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Disconnect mobile
   const disconnectMobile = useCallback(() => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock) {
+      adapter.connection.disconnectHost().catch(() => {});
+    }
     setConnectionStep('enter_key');
     setConnectionError(null);
   }, []);
@@ -634,6 +725,40 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Toggle Windows Backend Server
   const toggleBackendServer = useCallback(() => {
+    const adapter = getBackendAdapter();
+    const nextAction = device.backendServerStatus === 'running' ? 'stop' : 'start';
+
+    if (!adapter.isMock) {
+      adapter.connection
+        .setHostServerStatus(nextAction)
+        .then((statusRes) => {
+          const isRunning = statusRes.status === 'running';
+          const maybeNewKey = (statusRes as { pairingKey?: string }).pairingKey;
+          if (maybeNewKey) {
+            setGeneratedConnectionKey(maybeNewKey);
+          }
+          setDevice((prev) => ({
+            ...prev,
+            backendServerStatus: statusRes.status,
+            isOnline: isRunning,
+            tunnelStatus: isRunning ? 'active' : 'idle',
+            activePortBindings: statusRes.activePortBindings,
+            cpuUsagePercent: statusRes.cpuUsagePercent,
+            memoryUsageMb: statusRes.memoryUsageMb,
+            ...(maybeNewKey ? { pairingToken: maybeNewKey } : {}),
+          }));
+          if (!isRunning) {
+            setConnectionStep('enter_key');
+          }
+        })
+        .catch((err) => {
+          setConnectionError(
+            err instanceof Error ? err.message : 'Failed to toggle Windows host daemon.'
+          );
+        });
+      return;
+    }
+
     setDevice((prev) => {
       const nextStatus = prev.backendServerStatus === 'running' ? 'stopped' : 'running';
       return {
@@ -643,7 +768,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         tunnelStatus: nextStatus === 'running' ? 'active' : 'idle',
       };
     });
-  }, []);
+  }, [device.backendServerStatus]);
 
   // Prompt reconciliation when PC comes online with pending intents
   useEffect(() => {
@@ -852,7 +977,79 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // If PC is online: execute on native daemon
+      // If PC is online: execute on real Windows Host Companion via adapter (or mock fallback)
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        try {
+          const hostResult = (await adapter.terminal.executeCommand({
+            sessionId: activeSessionId,
+            command: trimmedCmd,
+            workingDir: activeSession.workingDir || activeProject.path,
+          })) as Awaited<ReturnType<typeof adapter.terminal.executeCommand>> & {
+            workingDir?: string;
+          };
+
+          if (hostResult.interceptCliPrompt) {
+            setInterceptedCli(hostResult.interceptCliPrompt);
+          }
+
+          if (hostResult.workingDir) {
+            const newDir = hostResult.workingDir;
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === activeSessionId ? { ...s, workingDir: newDir } : s
+              )
+            );
+            setProjects((prev) =>
+              prev.map((p) =>
+                p.id === activeProjectId ? { ...p, path: newDir } : p
+              )
+            );
+          }
+
+          const outLines: TerminalLine[] = hostResult.lines.map((line, idx) => ({
+            id: `out-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+            type: line.type,
+            content: line.content,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+          }));
+
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === activeSessionId
+                ? {
+                    ...s,
+                    buffer: [...s.buffer, ...outLines],
+                    isRunning: false,
+                  }
+                : s
+            )
+          );
+          return;
+        } catch (err) {
+          const errMessage =
+            err instanceof Error ? err.message : 'Failed to execute command on Windows host.';
+          const errorLine: TerminalLine = {
+            id: `err-${Date.now()}`,
+            type: 'error',
+            content: `[Host Execution Error] ${errMessage}`,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+          };
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === activeSessionId
+                ? {
+                    ...s,
+                    buffer: [...s.buffer, errorLine],
+                    isRunning: false,
+                  }
+                : s
+            )
+          );
+          return;
+        }
+      }
+
       const result = executeCommandOnDaemon(trimmedCmd, activeProject, installedCliMap);
 
       if (result.interceptCliPrompt) {
@@ -913,6 +1110,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [
       activeProjectId,
       activeSessionId,
+      activeSession.workingDir,
       activeProject,
       device.isOnline,
       installedCliMap,
@@ -925,6 +1123,13 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   // Send signals
   const sendSignal = useCallback(
     (signal: 'SIGINT' | 'SIGTERM' | 'CLEAR') => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        adapter.terminal
+          .sendSignal({ sessionId: activeSessionId, signal })
+          .catch(() => {});
+      }
+
       const now = new Date().toLocaleTimeString('en-US', { hour12: false });
       if (signal === 'CLEAR') {
         setSessions((prev) =>
@@ -933,11 +1138,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (signal === 'SIGINT') {
+      if (signal === 'SIGINT' || signal === 'SIGTERM') {
         const sigLine: TerminalLine = {
           id: `sig-${Date.now()}`,
           type: 'system',
-          content: `^C\n\x1b[31m[SIGINT]\x1b[0m Process interrupted by mobile client signal.`,
+          content: `^C\n\x1b[31m[${signal}]\x1b[0m Process interrupted by mobile client signal.`,
           timestamp: now,
         };
         setSessions((prev) =>
@@ -954,6 +1159,31 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Create session
   const createSession = useCallback((title: string, type: TerminalSession['type']) => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock) {
+      adapter.terminal
+        .createSession({ title, type, workingDir: activeProject.path })
+        .then((created) => {
+          setSessions((prev) => [...prev, created]);
+          setActiveSessionId(created.id);
+        })
+        .catch(() => {
+          const fallbackId = `sess-${Date.now()}`;
+          const newSession: TerminalSession = {
+            id: fallbackId,
+            title,
+            type,
+            workingDir: activeProject.path,
+            history: [],
+            buffer: [],
+            isRunning: false,
+          };
+          setSessions((prev) => [...prev, newSession]);
+          setActiveSessionId(fallbackId);
+        });
+      return;
+    }
+
     const newId = `sess-${Date.now()}`;
     const newSession: TerminalSession = {
       id: newId,
@@ -970,6 +1200,10 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Close session
   const closeSession = useCallback((id: string) => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock) {
+      adapter.terminal.closeSession(id).catch(() => {});
+    }
     setSessions((prev) => {
       if (prev.length <= 1) return prev;
       const next = prev.filter((s) => s.id !== id);
