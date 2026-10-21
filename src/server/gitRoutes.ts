@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { validateSafePath } from './fsSecurity';
+import { validateSafePath, resolveWorkspaceProjectPath } from './fsSecurity';
 import { GitCommitRequest, GitCommitResponse, GitPushPullResponse, GitStatusResponse } from '../services/contracts';
 
 export const gitRouter = Router();
@@ -34,7 +34,7 @@ async function verifyGitRepository(repoPath: string): Promise<boolean> {
  */
 gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = (req.query.projectPath as string) || process.cwd();
+    const projectPath = resolveWorkspaceProjectPath((req.query.projectPath || req.query.project || req.query.dir) as string || process.cwd());
     const validation = validateSafePath(projectPath);
 
     if (!validation.isValid) {

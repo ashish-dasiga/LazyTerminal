@@ -46,11 +46,26 @@ async function runPlaywrightVerification() {
     viewport: { width: 430, height: 932 }, // Mobile viewport for Lazy Terminal
   });
   const page = await context.newPage();
+  page.on('console', msg => console.log('PAGE CONSOLE:', msg.text()));
 
   try {
     // 3. Navigate to app
     await page.goto(baseUrl, { waitUntil: 'networkidle' });
     console.log('✓ Successfully loaded Lazy Terminal web client.');
+
+    // 3b. Handle switching to Mobile App if currently on portal
+    const mobileSwitchBtn = page.locator('button:has-text("Mobile App (Android)")').first();
+    if (await mobileSwitchBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      // Check if portal is active
+      const portalTab = page.locator('button:has-text("Install Apps")').first();
+      const isPortalActive = await portalTab.evaluate((el: HTMLElement) => el.classList.contains('text-white')).catch(() => false);
+      if (isPortalActive) {
+        console.log('✓ Verified Lazy Terminal Installation Portal.');
+        await mobileSwitchBtn.click();
+        await page.waitForTimeout(400);
+        console.log('✓ Switched to Mobile App view.');
+      }
+    }
 
     // 4. Dismiss reconciliation modal if open
     const modalCloseBtn = page.locator('button:has-text("Skip All"), button:has-text("Execute All"), .fixed.inset-0.z-50 button').first();

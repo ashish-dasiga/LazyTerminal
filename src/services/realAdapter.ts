@@ -237,13 +237,17 @@ class RealTerminalService implements ITerminalService {
 
 class RealFileSystemService implements IFileSystemService {
   async listFiles(req: ListFilesRequest): Promise<ProjectFile[]> {
-    const params = new URLSearchParams({ dir: req.projectPath });
-    if (req.subDirectory) params.set('subdir', req.subDirectory);
-    return apiRequest<ProjectFile[]>(`/api/v1/fs/list?${params}`);
+    const params = new URLSearchParams({ projectPath: req.projectPath, dir: req.projectPath });
+    if (req.subDirectory) { params.set('subDirectory', req.subDirectory); params.set('subdir', req.subDirectory); }
+    const res = await apiRequest<{ files?: ProjectFile[] } | ProjectFile[]>(`/api/v1/fs/list?${params}`);
+    if (Array.isArray(res)) return res;
+    if (res && Array.isArray((res as any).files)) return (res as any).files;
+    return [];
   }
 
   async readFile(req: ReadFileRequest): Promise<ReadFileResponse> {
-    const params = new URLSearchParams({ path: req.filePath });
+    const projectPath = (req as any).projectPath || '';
+    const params = new URLSearchParams({ filePath: req.filePath, path: req.filePath, projectPath, dir: projectPath });
     return apiRequest<ReadFileResponse>(`/api/v1/fs/read?${params}`);
   }
 
@@ -275,7 +279,7 @@ class RealFileSystemService implements IFileSystemService {
 
 class RealGitService implements IGitService {
   async getStatus(projectPath: string): Promise<GitStatusResponse> {
-    const params = new URLSearchParams({ project: projectPath });
+    const params = new URLSearchParams({ projectPath, project: projectPath, dir: projectPath });
     return apiRequest<GitStatusResponse>(`/api/v1/git/status?${params}`);
   }
 

@@ -427,8 +427,8 @@ const INITIAL_INTENTS: CommandIntent[] = [
 
 interface RelayContextType {
   // Dual frontend switcher
-  activeFrontend: 'mobile' | 'laptop';
-  setActiveFrontend: (fe: 'mobile' | 'laptop') => void;
+  activeFrontend: 'portal' | 'mobile' | 'laptop';
+  setActiveFrontend: (fe: 'portal' | 'mobile' | 'laptop') => void;
 
   // User Account & Mobile Connection Flow
   currentUser: UserAccount;
@@ -518,8 +518,27 @@ interface RelayContextType {
 
 const RelayContext = createContext<RelayContextType | null>(null);
 
+function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('view') === 'mobile' || params.get('source') === 'pwa') {
+      return 'mobile';
+    }
+    if (params.get('view') === 'laptop') {
+      return 'laptop';
+    }
+    if (params.get('view') === 'install' || params.get('view') === 'portal') {
+      return 'portal';
+    }
+    if (window.innerWidth <= 640) {
+      return 'mobile';
+    }
+  }
+  return 'portal';
+}
+
 export function RelayProvider({ children }: { children: ReactNode }) {
-  const [activeFrontend, setActiveFrontend] = useState<'mobile' | 'laptop'>('mobile');
+  const [activeFrontend, setActiveFrontend] = useState<'portal' | 'mobile' | 'laptop'>(getInitialFrontend);
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_USER);
   const [connectionStep, setConnectionStep] = useState<MobileConnectionStep>('enter_key');
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -965,10 +984,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setFileLoading(true);
         setFileError(null);
         try {
-          const items = await getBackendAdapter().fileSystem.listFiles({
+          const rawItems = await getBackendAdapter().fileSystem.listFiles({
             projectPath: activeProject.path,
             subDirectory: subDir,
           });
+          const items: ProjectFile[] = Array.isArray(rawItems) ? rawItems : ((rawItems as any)?.files || []);
           if (items && items.length > 0) {
             setProjects((prev) =>
               prev.map((p) => {

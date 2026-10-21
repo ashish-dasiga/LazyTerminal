@@ -40,6 +40,9 @@ function resolveHostUrl(): string {
       const stored = localStorage.getItem(LOCAL_STORAGE_HOST_KEY);
       if (stored) return stored;
     } catch {}
+    if (typeof window !== "undefined" && window.location && window.location.origin && window.location.origin.startsWith("http")) {
+      return window.location.origin;
+    }
   }
   if (memoryHostUrl) return memoryHostUrl;
 

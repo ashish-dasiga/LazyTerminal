@@ -38,8 +38,8 @@ function isBinaryBuffer(buffer: Buffer): boolean {
  */
 fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = resolveWorkspaceProjectPath(req.query.projectPath as string);
-    const subDirectory = (req.query.subDirectory as string) || '';
+    const projectPath = resolveWorkspaceProjectPath((req.query.projectPath || req.query.dir) as string);
+    const subDirectory = ((req.query.subDirectory || req.query.subdir) as string) || '';
 
     const targetDir = subDirectory ? path.join(projectPath, subDirectory) : projectPath;
     const validation = validateSafePath(targetDir, projectPath);
@@ -133,8 +133,8 @@ fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
  */
 fsRouter.get('/read', async (req: Request, res: Response): Promise<void> => {
   try {
-    const filePath = req.query.filePath as string;
-    const projectPath = resolveWorkspaceProjectPath(req.query.projectPath as string);
+    const filePath = (req.query.filePath || req.query.path) as string;
+    const projectPath = resolveWorkspaceProjectPath((req.query.projectPath || req.query.dir) as string);
 
     if (!filePath) {
       res.status(400).json({ error: 'INVALID_PATH', message: 'filePath is required.' });

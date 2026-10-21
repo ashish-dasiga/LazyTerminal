@@ -15,7 +15,9 @@
     "test:shreya": "node --import tsx --test tests/cliDetector.test.ts tests/runDebug.test.ts tests/preview.test.ts",
     "test:deeksha": "node --import tsx --test src/tests/*.test.ts",
     "test": "tsx tests/fsGit.test.ts && tsx tests/hostApi.test.ts && node --import tsx --test src/tests/*.test.ts",
-    "test:e2e": "tsx tests/e2ePlaywright.test.ts"
+    "test:e2e": "tsx tests/e2ePlaywright.test.ts",
+    "test:portal": "tsx tests/portalVerification.test.ts",
+    "test:apps": "tsx tests/appsVerification.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
