@@ -1,20 +1,18 @@
 import { IRelayBackendAdapter } from './contracts';
 import { MockRelayBackendAdapter } from './mockAdapter';
+import { WindowsHostBackendAdapter } from './hostClientAdapter';
 
 export * from './contracts';
 export * from './mockAdapter';
 export * from './mockDaemon';
+export * from './hostClientAdapter';
 
 /**
  * Global singleton adapter instance.
- * By default, this runs `MockRelayBackendAdapter` for browser testing and rapid prototyping.
- * 
- * TO PLUG IN YOUR REAL BACKEND:
- * 1. Implement `RealRelayBackendAdapter` matching `IRelayBackendAdapter`.
- * 2. Replace the instance below:
- *    `let activeAdapter: IRelayBackendAdapter = new RealRelayBackendAdapter('wss://your-host-ip:9871');`
+ * Defaults to `WindowsHostBackendAdapter` to connect pairing, host status,
+ * and persistent terminal sessions to the local Windows PC companion.
  */
-let activeAdapter: IRelayBackendAdapter = new MockRelayBackendAdapter();
+let activeAdapter: IRelayBackendAdapter = new WindowsHostBackendAdapter();
 
 export function getBackendAdapter(): IRelayBackendAdapter {
   return activeAdapter;
