@@ -11,6 +11,35 @@ export function getAllowedRoots(): string[] {
   return roots;
 }
 
+const DEMO_PROJECT_ROOTS = [
+  'c:/projects/hyper-relay',
+  'c:/dev/ai-agents/claude-fleet',
+  'c:/work/enterprise-dashboard',
+];
+
+/**
+ * Maps frontend placeholder project paths (from initial UI state) to the active host workspace root
+ * when those placeholder directories do not exist on the host machine.
+ */
+export function resolveWorkspaceProjectPath(requestedPath?: string, defaultRoot?: string): string {
+  const root = defaultRoot || getAllowedRoots()[0];
+  if (!requestedPath || !requestedPath.trim() || requestedPath.trim() === '.') {
+    return root;
+  }
+  const normalized = requestedPath.trim().replace(/\\/g, '/');
+  const lower = normalized.toLowerCase();
+  for (const demoRoot of DEMO_PROJECT_ROOTS) {
+    if (lower === demoRoot && !fs.existsSync(requestedPath)) {
+      return root;
+    }
+    if (lower.startsWith(demoRoot + '/') && !fs.existsSync(demoRoot)) {
+      const suffix = normalized.slice(demoRoot.length + 1);
+      return path.join(root, suffix);
+    }
+  }
+  return requestedPath;
+}
+
 // Windows reserved device names to block
 const RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
@@ -51,15 +80,19 @@ export function validateSafePath(
     };
   }
 
-  // 2. Normalize Windows backslashes so path resolution treats them as directory separators on all platforms
-  const normalizedSeparators = requestedPath.replace(/\\/g, '/');
-
-  // 3. Normalize base directory and allowed roots
+  // 2. Normalize base directory and allowed roots
   const allowedRoots = (customAllowedRoots && customAllowedRoots.length > 0)
     ? customAllowedRoots.map((r) => path.resolve(r))
     : getAllowedRoots();
 
-  const primaryBase = baseDir ? path.resolve(baseDir) : allowedRoots[0];
+  const effectiveBaseDir = baseDir
+    ? resolveWorkspaceProjectPath(baseDir, allowedRoots[0])
+    : allowedRoots[0];
+  const primaryBase = path.resolve(effectiveBaseDir);
+
+  // 3. Map placeholder frontend root if applicable and normalize Windows backslashes
+  const effectiveRequestedPath = resolveWorkspaceProjectPath(requestedPath, primaryBase);
+  const normalizedSeparators = effectiveRequestedPath.replace(/\\/g, '/');
 
   // 4. Resolve target path
   let resolved: string;

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   AiCliTool,
   CommandIntent,
@@ -572,6 +572,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const [fileLoading, setFileLoading] = useState<boolean>(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
+  const fileHashesRef = useRef<Record<string, string>>({});
   const clearFileError = useCallback(() => setFileError(null), []);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0];
@@ -675,10 +676,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setFileLoading(true);
         setFileError(null);
         try {
-          await getBackendAdapter().fileSystem.writeFile({
+          const writeRes = await getBackendAdapter().fileSystem.writeFile({
             filePath,
             content: newContent,
+            expectedVersionHash: fileHashesRef.current[filePath],
           });
+          if (writeRes.newHash) {
+            fileHashesRef.current[filePath] = writeRes.newHash;
+          }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : 'Save failed on host';
           setFileError(msg);
@@ -734,7 +739,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setFileLoading(true);
         setFileError(null);
         try {
-          const res = await getBackendAdapter().fileSystem.readFile({ filePath });
+          const res = (await getBackendAdapter().fileSystem.readFile({ filePath })) as {
+            content: string;
+            sizeBytes: number;
+            hash?: string;
+          };
+          if (res.hash) {
+            fileHashesRef.current[filePath] = res.hash;
+          }
           setProjects((prev) =>
             prev.map((p) => {
               if (p.id !== activeProjectId) return p;
@@ -785,7 +797,29 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             setProjects((prev) =>
               prev.map((p) => {
                 if (p.id !== activeProjectId) return p;
-                return { ...p, files: items };
+                if (!subDir) {
+                  const existingChildren = new Map(
+                    p.files.filter((f) => f.isDir && f.children).map((f) => [f.name, f.children])
+                  );
+                  const merged = items.map((item) =>
+                    item.isDir && existingChildren.has(item.name)
+                      ? { ...item, children: existingChildren.get(item.name) }
+                      : item
+                  );
+                  return { ...p, files: merged };
+                }
+                const segments = subDir.split('/').filter(Boolean);
+                const attachChildren = (list: ProjectFile[], depth: number): ProjectFile[] =>
+                  list.map((f) => {
+                    if (f.isDir && f.name === segments[depth]) {
+                      if (depth === segments.length - 1) {
+                        return { ...f, children: items };
+                      }
+                      return { ...f, children: attachChildren(f.children || [], depth + 1) };
+                    }
+                    return f;
+                  });
+                return { ...p, files: attachChildren(p.files, 0) };
               })
             );
           }
@@ -933,29 +967,60 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [activeProjectId, activeProject.path, device.isOnline]
   );
 
+  // Sync live host filesystem and Git status on mount / project switch
+  useEffect(() => {
+    if (device.isOnline) {
+      refreshFiles().catch(() => {});
+      refreshGitStatus().catch(() => {});
+    }
+  }, [device.isOnline, activeProjectId, refreshFiles, refreshGitStatus]);
+
   // Create new folder in active project
-  const createFolder = useCallback((folderName: string) => {
-    const cleanName = folderName.trim();
-    if (!cleanName) return;
+  const createFolder = useCallback(
+    async (folderName: string) => {
+      const cleanName = folderName.trim();
+      if (!cleanName) return;
 
-    const newFolder: ProjectFile = {
-      name: cleanName,
-      path: cleanName,
-      isDir: true,
-      modified: 'Just now',
-      children: [],
-    };
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const fsService = getBackendAdapter().fileSystem as {
+            createFile: (req: { directoryPath: string; fileName: string; isFolder?: boolean }) => Promise<ProjectFile>;
+          };
+          await fsService.createFile({
+            directoryPath: activeProject.path,
+            fileName: cleanName,
+            isFolder: true,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Create folder failed on host';
+          setFileError(msg);
+        } finally {
+          setFileLoading(false);
+        }
+      }
 
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== activeProjectId) return p;
-        return {
-          ...p,
-          files: [...p.files, newFolder],
-        };
-      })
-    );
-  }, [activeProjectId]);
+      const newFolder: ProjectFile = {
+        name: cleanName,
+        path: cleanName,
+        isDir: true,
+        modified: 'Just now',
+        children: [],
+      };
+
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            files: [...p.files, newFolder],
+          };
+        })
+      );
+    },
+    [activeProjectId, activeProject.path, device.isOnline]
+  );
 
   // Execute terminal command
   const executeCommand = useCallback(

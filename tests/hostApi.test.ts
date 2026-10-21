@@ -18,8 +18,8 @@ async function testApi() {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    // 1. Test FS List on current project
-    const listRes = await fetch(`${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent(process.cwd())}`);
+    // 1. Test FS List on current project and default UI project placeholder
+    const listRes = await fetch(`${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
     assert.strictEqual(listRes.status, 200, 'GET /api/v1/fs/list should return 200');
     const listData = await listRes.json();
     assert.ok(Array.isArray(listData.files), 'Response should contain files array');
@@ -27,6 +27,15 @@ async function testApi() {
     const hasPackageJson = listData.files.some((f: any) => f.name === 'package.json');
     assert.ok(hasPackageJson, 'Listing should find package.json');
     console.log('✓ GET /api/v1/fs/list returned real project files.');
+
+    // 1b. Test FS List on subdirectory (src)
+    const subListRes = await fetch(
+      `${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}&subDirectory=src`
+    );
+    assert.strictEqual(subListRes.status, 200, 'Subdirectory list should return 200');
+    const subListData = await subListRes.json();
+    assert.ok(subListData.files.some((f: any) => f.name === 'App.tsx'), 'src listing should include App.tsx');
+    console.log('✓ GET /api/v1/fs/list?subDirectory=src returned real subdirectory files.');
 
     // 2. Test Path Traversal Protection over HTTP
     const attackRes = await fetch(
@@ -46,8 +55,38 @@ async function testApi() {
     assert.ok(readData.content.includes('"name": "react-example"'));
     console.log('✓ GET /api/v1/fs/read successfully read package.json with SHA-256 hash.');
 
+    // 3b. Test Create, Conflict Detection (409), Write, and Delete Lifecycle over HTTP
+    const tempFileName = `.tmp_api_test_${Date.now()}.txt`;
+    const createRes = await fetch(`${baseUrl}/api/v1/fs/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ directoryPath: process.cwd(), fileName: tempFileName, isTextOnly: true }),
+    });
+    assert.strictEqual(createRes.status, 201, 'POST /api/v1/fs/create should return 201');
+
+    const conflictRes = await fetch(`${baseUrl}/api/v1/fs/write`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filePath: tempFileName,
+        content: 'should fail due to stale hash',
+        expectedVersionHash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+      }),
+    });
+    assert.strictEqual(conflictRes.status, 409, 'Stale version hash write must return 409 Conflict');
+    const conflictData = await conflictRes.json();
+    assert.strictEqual(conflictData.error, 'FILE_CONFLICT');
+
+    const deleteRes = await fetch(`${baseUrl}/api/v1/fs/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePath: tempFileName }),
+    });
+    assert.strictEqual(deleteRes.status, 200, 'DELETE /api/v1/fs/delete should return 200');
+    console.log('✓ Create, 409 FILE_CONFLICT check, and Delete lifecycle verified over HTTP.');
+
     // 4. Test Git Status on current project
-    const gitStatusRes = await fetch(`${baseUrl}/api/v1/git/status?projectPath=${encodeURIComponent(process.cwd())}`);
+    const gitStatusRes = await fetch(`${baseUrl}/api/v1/git/status?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
     assert.strictEqual(gitStatusRes.status, 200);
     const gitData = await gitStatusRes.json();
     assert.strictEqual(gitData.branch, 'ashritha');
@@ -56,7 +95,7 @@ async function testApi() {
     console.log(`✓ GET /api/v1/git/status successfully queried repository on branch: ${gitData.branch}`);
 
     // 5. Test Git Branches
-    const branchesRes = await fetch(`${baseUrl}/api/v1/git/branches?projectPath=${encodeURIComponent(process.cwd())}`);
+    const branchesRes = await fetch(`${baseUrl}/api/v1/git/branches?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
     assert.strictEqual(branchesRes.status, 200);
     const branchData = await branchesRes.json();
     assert.ok(branchData.branches.includes('ashritha'));

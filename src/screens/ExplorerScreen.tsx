@@ -67,6 +67,12 @@ export function ExplorerScreen() {
   const [fileToDelete, setFileToDelete] = useState<ProjectFile | null>(null);
   const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
+  // Fetch real directory contents from host when Explorer opens or folder stack changes
+  const currentSubDir = currentDirStack.join('/');
+  useEffect(() => {
+    refreshFiles(currentSubDir || undefined).catch(() => {});
+  }, [activeProject.id, currentSubDir, refreshFiles]);
+
   // Sync editor content when activeFile changes or unsaved drafts exist
   useEffect(() => {
     if (activeFile) {

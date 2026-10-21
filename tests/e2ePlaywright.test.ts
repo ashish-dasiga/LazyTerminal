@@ -30,6 +30,11 @@ async function runPlaywrightVerification() {
   const baseUrl = `http://127.0.0.1:${port}`;
   console.log(`✓ Test server running on ${baseUrl}`);
 
+  const screenshotDir = process.env.LAZY_TERMINAL_SCREENSHOT_DIR;
+  if (screenshotDir) {
+    fs.mkdirSync(screenshotDir, { recursive: true });
+  }
+
   // 2. Launch Playwright headless browser
   console.log('Launching headless Chromium via Playwright...');
   const browser = await chromium.launch({ headless: true });
@@ -75,56 +80,75 @@ async function runPlaywrightVerification() {
     console.log('Navigating to Explorer screen...');
     const explorerTab = page.locator('nav button:has-text("Explorer")').first();
     await explorerTab.click();
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);
 
-    // Verify breadcrumb or file elements in Explorer
-    const fileItems = page.locator('.truncate');
-    await fileItems.first().waitFor({ state: 'visible', timeout: 5000 });
-    const count = await fileItems.count();
-    assert.ok(count > 0, 'Explorer must display file items');
-    console.log(`✓ Explorer rendered file list with ${count} visible elements.`);
+    // Verify real workspace files (package.json, server.ts) are rendered from host /api/v1/fs/list
+    const pkgItem = page.locator('text=package.json').first();
+    await pkgItem.waitFor({ state: 'visible', timeout: 5000 });
+    const serverTsItem = page.locator('text=server.ts').first();
+    assert.ok(await serverTsItem.isVisible(), 'Explorer must display real workspace file server.ts');
+    console.log('✓ Explorer rendered real host workspace files (package.json, server.ts).');
 
-    // 7. Test opening a file in the mobile code editor
-    const firstFile = page.locator('text=README.md, text=package.json').first();
-    if (await firstFile.isVisible()) {
-      console.log('Opening file in code editor...');
-      await firstFile.click();
-      await page.waitForTimeout(500);
-
-      // Verify editor toolbar is visible
-      const editorToolbar = page.locator('button:has-text("Edit"), button:has-text("Save")').first();
-      await editorToolbar.waitFor({ state: 'visible', timeout: 3000 });
-      console.log('✓ Code viewer and editor toolbar active.');
-
-      // Return to file list
-      const backBtn = page.locator('button[title*="return to folder"], button[title*="Close file"]').first();
-      if (await backBtn.isVisible()) {
-        await backBtn.click();
-        await page.waitForTimeout(300);
-      }
+    if (screenshotDir) {
+      await page.screenshot({ path: path.join(screenshotDir, '01-explorer-list.png') });
     }
+
+    // 7. Test opening package.json in the mobile code editor and verifying real content from /api/v1/fs/read
+    console.log('Opening package.json in code editor...');
+    await pkgItem.click();
+    await page.waitForTimeout(600);
+
+    const editorToolbar = page.locator('button:has-text("Edit"), button:has-text("Save")').first();
+    await editorToolbar.waitFor({ state: 'visible', timeout: 3000 });
+    const codeViewerContent = await page.locator('pre').first().textContent();
+    assert.ok(
+      codeViewerContent && codeViewerContent.includes('"react-example"'),
+      'Code viewer must display real package.json content fetched from host'
+    );
+    console.log('✓ Code viewer loaded real package.json content from host.');
+
+    if (screenshotDir) {
+      await page.screenshot({ path: path.join(screenshotDir, '02-explorer-editor.png') });
+    }
+
+    // Return to file list and test real subdirectory navigation (src/)
+    const backBtn = page.locator('button[title*="return to folder"], button[title*="Close file"]').first();
+    await backBtn.click();
+    await page.waitForTimeout(400);
+
+    const srcFolder = page.locator('span:text-is("src")').first();
+    await srcFolder.click();
+    await page.waitForTimeout(600);
+    const appTsxItem = page.locator('text=App.tsx').first();
+    await appTsxItem.waitFor({ state: 'visible', timeout: 5000 });
+    console.log('✓ Subdirectory navigation into src/ loaded real files (App.tsx).');
 
     // 8. Navigate to Source Control screen
     console.log('Navigating to Source Control screen...');
     const gitTab = page.locator('nav button:has-text("Git")').first();
     await gitTab.click();
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(800);
 
     // Verify Source Control Header & Sync Status
     const sourceControlHeader = page.locator('text=Source Control').first();
     await sourceControlHeader.waitFor({ state: 'visible', timeout: 5000 });
     console.log('✓ Source Control screen active.');
 
-    // Verify Commit Changes button or commit input
+    // Verify Commit Changes input
     const commitInput = page.locator('input[placeholder*="Commit message"]');
     assert.ok(await commitInput.isVisible(), 'Commit message input must be visible');
     console.log('✓ Commit box verified in Source Control.');
 
-    // Verify Branch selector displays
-    const branchBtn = page.locator('button:has-text("main"), button:has-text("ashritha")').first();
-    assert.ok(await branchBtn.isVisible(), 'Branch indicator button must be visible');
+    // Verify Branch selector displays the REAL branch 'ashritha' (not mock 'main')
+    const branchBtn = page.locator('button:has-text("ashritha")').first();
+    await branchBtn.waitFor({ state: 'visible', timeout: 5000 });
     const branchText = await branchBtn.textContent();
-    console.log(`✓ Git branch selector verified (showing: ${branchText?.trim()}).`);
+    assert.strictEqual(branchText?.trim(), 'ashritha', 'Branch indicator must show real branch ashritha');
+    console.log(`✓ Git branch selector verified showing real host branch: ${branchText?.trim()}.`);
+
+    if (screenshotDir) {
+      await page.screenshot({ path: path.join(screenshotDir, '03-source-control.png') });
+    }
 
     console.log('\n======================================================');
     console.log('  PLAYWRIGHT END-TO-END VERIFICATION PASSED (100%)!   ');

@@ -71,8 +71,12 @@ export function SourceControlScreen() {
     setIsCommitting(true);
     setGitError(null);
     try {
-      await getBackendAdapter().git.stageFiles(['.']);
-      await getBackendAdapter().git.commit({
+      const httpGit = getBackendAdapter().git as {
+        stageFiles: (files: string[], projectPath?: string) => Promise<void>;
+        commit: (req: { projectPath: string; message: string }) => Promise<unknown>;
+      };
+      await httpGit.stageFiles(['.'], activeProject.path);
+      await httpGit.commit({
         projectPath: activeProject.path,
         message: commitMessage.trim(),
       });
@@ -93,7 +97,8 @@ export function SourceControlScreen() {
     setIsPushing(true);
     setGitError(null);
     try {
-      await getBackendAdapter().git.push();
+      const httpGit = getBackendAdapter().git as { push: (b?: string, p?: string) => Promise<unknown> };
+      await httpGit.push(undefined, activeProject.path);
       await refreshGitStatus();
     } catch (err: unknown) {
       setGitError(err instanceof Error ? err.message : 'Push failed');
@@ -107,7 +112,8 @@ export function SourceControlScreen() {
     setIsPulling(true);
     setGitError(null);
     try {
-      await getBackendAdapter().git.pull();
+      const httpGit = getBackendAdapter().git as { pull: (b?: string, p?: string) => Promise<unknown> };
+      await httpGit.pull(undefined, activeProject.path);
       await refreshGitStatus();
     } catch (err: unknown) {
       setGitError(err instanceof Error ? err.message : 'Pull failed');
@@ -120,7 +126,8 @@ export function SourceControlScreen() {
   const handleSwitchBranch = async (branch: string) => {
     setGitError(null);
     try {
-      await getBackendAdapter().git.switchBranch(branch);
+      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
+      await httpGit.switchBranch(branch, activeProject.path, false);
       setSelectedBranch(branch);
       setShowBranchModal(false);
       await refreshGitStatus();
@@ -134,11 +141,14 @@ export function SourceControlScreen() {
 
   const handleCreateBranch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newBranchInput.trim()) return;
+    const targetBranch = newBranchInput.trim();
+    if (!targetBranch) return;
     setGitError(null);
     try {
-      await executeCommand(`git checkout -b ${newBranchInput.trim()}`);
-      setSelectedBranch(newBranchInput.trim());
+      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
+      await httpGit.switchBranch(targetBranch, activeProject.path, true);
+      setBranches((prev) => (prev.includes(targetBranch) ? prev : [...prev, targetBranch]));
+      setSelectedBranch(targetBranch);
       setNewBranchInput('');
       setShowBranchModal(false);
       await refreshGitStatus();
@@ -167,7 +177,7 @@ export function SourceControlScreen() {
   };
 
   // Files to display: prefer real gitStatus.changedFiles, fallback to activeProject.files
-  const dirtyFiles = gitStatus && gitStatus.changedFiles.length > 0
+  const dirtyFiles = gitStatus
     ? gitStatus.changedFiles.map((cf) => ({
         name: cf.path,
         path: cf.path,
@@ -318,7 +328,7 @@ export function SourceControlScreen() {
         ) : (
           dirtyFiles.map((file) => (
             <div
-              key={file.name}
+              key={`${file.path}-${file.staged ? 'staged' : 'unstaged'}`}
               className="p-2.5 bg-[#16181e] border border-[#252831] rounded-lg flex items-center justify-between text-xs font-mono"
             >
               <div className="flex items-center gap-2.5 truncate">

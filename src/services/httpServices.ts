@@ -52,14 +52,14 @@ export class HttpFileSystemService implements IFileSystemService {
     return data.files as ProjectFile[];
   }
 
-  async readFile(req: ReadFileRequest): Promise<ReadFileResponse> {
+  async readFile(req: ReadFileRequest): Promise<ReadFileResponse & { hash?: string }> {
     const params = new URLSearchParams({ filePath: req.filePath });
     const res = await fetch(`${this.baseUrl}/api/v1/fs/read?${params.toString()}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({ message: res.statusText }));
       throw new Error(err.message || `Failed to read file: ${res.statusText}`);
     }
-    return (await res.json()) as ReadFileResponse;
+    return (await res.json()) as ReadFileResponse & { hash?: string };
   }
 
   async writeFile(req: WriteFileRequest): Promise<WriteFileResponse> {
@@ -75,7 +75,7 @@ export class HttpFileSystemService implements IFileSystemService {
     return (await res.json()) as WriteFileResponse;
   }
 
-  async createFile(req: CreateFileRequest): Promise<ProjectFile> {
+  async createFile(req: CreateFileRequest & { isFolder?: boolean }): Promise<ProjectFile> {
     const res = await fetch(`${this.baseUrl}/api/v1/fs/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -188,11 +188,11 @@ export class HttpGitService implements IGitService {
     return (await res.json()) as GitPushPullResponse;
   }
 
-  async switchBranch(branchName: string, projectPath?: string): Promise<void> {
+  async switchBranch(branchName: string, projectPath?: string, createNew?: boolean): Promise<void> {
     const res = await fetch(`${this.baseUrl}/api/v1/git/checkout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ branchName, projectPath }),
+      body: JSON.stringify({ branchName, projectPath, createNew }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ message: res.statusText }));

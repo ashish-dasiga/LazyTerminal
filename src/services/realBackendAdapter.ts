@@ -33,7 +33,11 @@ export class RealRelayBackendAdapter implements IRelayBackendAdapter {
 
   constructor(hostBaseUrl?: string) {
     const fallback = new MockRelayBackendAdapter();
-    this.backendEndpoint = hostBaseUrl || 'http://127.0.0.1:3000';
+    const defaultEndpoint =
+      typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : 'http://127.0.0.1:3000';
+    this.backendEndpoint = hostBaseUrl || defaultEndpoint;
 
     this.auth = fallback.auth;
     this.connection = fallback.connection;

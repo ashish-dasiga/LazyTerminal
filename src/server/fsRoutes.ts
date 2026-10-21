@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { validateSafePath } from './fsSecurity';
+import { validateSafePath, resolveWorkspaceProjectPath } from './fsSecurity';
 import { ProjectFile } from '../types/relay';
 
 export const fsRouter = Router();
@@ -38,11 +38,11 @@ function isBinaryBuffer(buffer: Buffer): boolean {
  */
 fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = (req.query.projectPath as string) || process.cwd();
+    const projectPath = resolveWorkspaceProjectPath(req.query.projectPath as string);
     const subDirectory = (req.query.subDirectory as string) || '';
 
     const targetDir = subDirectory ? path.join(projectPath, subDirectory) : projectPath;
-    const validation = validateSafePath(targetDir);
+    const validation = validateSafePath(targetDir, projectPath);
 
     if (!validation.isValid) {
       res.status(403).json({
@@ -79,7 +79,6 @@ fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
       if (entry.name === '.git') continue;
 
       const fullPath = path.join(safeDir, entry.name);
-      const relPath = path.relative(validation.resolvedPath, fullPath).replace(/\\/g, '/');
 
       try {
         const itemStat = await fs.promises.stat(fullPath);
@@ -135,7 +134,7 @@ fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
 fsRouter.get('/read', async (req: Request, res: Response): Promise<void> => {
   try {
     const filePath = req.query.filePath as string;
-    const projectPath = (req.query.projectPath as string) || process.cwd();
+    const projectPath = resolveWorkspaceProjectPath(req.query.projectPath as string);
 
     if (!filePath) {
       res.status(400).json({ error: 'INVALID_PATH', message: 'filePath is required.' });
@@ -235,7 +234,7 @@ fsRouter.post('/write', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const validation = validateSafePath(filePath, projectPath || process.cwd());
+    const validation = validateSafePath(filePath, resolveWorkspaceProjectPath(projectPath));
     if (!validation.isValid) {
       res.status(403).json({
         error: validation.errorCode || 'PATH_NOT_ALLOWED',
@@ -299,11 +298,11 @@ fsRouter.post('/write', async (req: Request, res: Response): Promise<void> => {
 
 /**
  * POST /api/v1/fs/create
- * Body: { directoryPath, fileName, isTextOnly, projectPath }
+ * Body: { directoryPath, fileName, isTextOnly, isFolder, projectPath }
  */
 fsRouter.post('/create', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { directoryPath, fileName, isTextOnly, projectPath } = req.body;
+    const { directoryPath, fileName, isTextOnly, isFolder, projectPath } = req.body;
 
     if (!fileName || typeof fileName !== 'string') {
       res.status(400).json({ error: 'INVALID_NAME', message: 'fileName is required.' });
@@ -313,16 +312,16 @@ fsRouter.post('/create', async (req: Request, res: Response): Promise<void> => {
     if (fileName.includes('/') || fileName.includes('\\')) {
       res.status(400).json({
         error: 'INVALID_NAME',
-        message: 'File name cannot contain directory separators.',
+        message: 'Name cannot contain directory separators.',
       });
       return;
     }
 
-    const cleanName = isTextOnly && !fileName.includes('.') ? `${fileName}.txt` : fileName;
-    const baseDir = directoryPath || projectPath || process.cwd();
+    const cleanName = !isFolder && isTextOnly && !fileName.includes('.') ? `${fileName}.txt` : fileName;
+    const baseDir = resolveWorkspaceProjectPath(directoryPath || projectPath);
     const targetPath = path.join(baseDir, cleanName);
 
-    const validation = validateSafePath(targetPath);
+    const validation = validateSafePath(targetPath, baseDir);
     if (!validation.isValid) {
       res.status(403).json({
         error: validation.errorCode || 'PATH_NOT_ALLOWED',
@@ -336,8 +335,22 @@ fsRouter.post('/create', async (req: Request, res: Response): Promise<void> => {
     if (fs.existsSync(safePath)) {
       res.status(409).json({
         error: 'FILE_ALREADY_EXISTS',
-        message: `File already exists: ${cleanName}`,
+        message: `Target already exists: ${cleanName}`,
       });
+      return;
+    }
+
+    if (isFolder) {
+      await fs.promises.mkdir(safePath, { recursive: true });
+      const createdFolder: ProjectFile = {
+        name: cleanName,
+        path: cleanName,
+        isDir: true,
+        modified: 'Just now',
+        gitStatus: 'clean',
+        children: [],
+      };
+      res.status(201).json(createdFolder);
       return;
     }
 
@@ -373,7 +386,7 @@ fsRouter.post('/create', async (req: Request, res: Response): Promise<void> => {
 fsRouter.delete('/delete', async (req: Request, res: Response): Promise<void> => {
   try {
     const filePath = (req.body?.filePath || req.query?.filePath) as string;
-    const projectPath = (req.body?.projectPath || req.query?.projectPath || process.cwd()) as string;
+    const projectPath = resolveWorkspaceProjectPath((req.body?.projectPath || req.query?.projectPath) as string);
 
     if (!filePath) {
       res.status(400).json({ error: 'INVALID_PATH', message: 'filePath is required.' });
