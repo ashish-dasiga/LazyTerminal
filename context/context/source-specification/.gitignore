@@ -1,0 +1,61 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# Build output and installers
+build/
+dist/
+out/
+release/
+artifacts/
+*.apk
+*.aab
+*.exe
+*.msi
+*.pdb
+*.class
+*.jar
+
+# Logs, caches, local runtime state
+*.log
+logs/
+tmp/
+temp/
+cache/
+runtime-data/
+local-state/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python, if used
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node, if used
+node_modules/
+.npm/
+.pnpm-store/
+
+# Android/Gradle, if used
+.gradle/
+local.properties
+.cxx/
+.externalNativeBuild/
+
+# .NET, if used
+bin/
+obj/
+
+# Keep documentation, tests, assets/workflow_diagram.png, and state docs tracked.
