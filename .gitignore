@@ -8,4 +8,6 @@ coverage/
 !.env.example
 test-results/
 playwright-report/
+build_android/
+*.png
 /context/

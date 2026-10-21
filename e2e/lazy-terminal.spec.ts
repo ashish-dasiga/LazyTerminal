@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 // Helper to complete the connection/pairing flow
 async function pairAndConnect(page: any) {
-  await page.goto('/');
+  await page.goto('/?view=mobile');
 
   // Wait for the connection screen
   await expect(page.locator('text=Enter Token Number')).toBeVisible({ timeout: 10000 });
@@ -30,7 +30,7 @@ async function pairAndConnect(page: any) {
 test.describe('Lazy Terminal — E2E Suite', () => {
 
   test('1. Full Pairing Flow: Enter token and connect to Terminal workspace', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/?view=mobile');
 
     // Top application bar
     await expect(page.locator('header').locator('text=Remote Development System')).toBeVisible();
@@ -141,7 +141,7 @@ test.describe('Lazy Terminal — E2E Suite', () => {
   });
 
   test('6. Dual Frontend Architecture: Switch between Mobile and Laptop Workstation', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/?view=mobile');
 
     // Switch to Laptop view using header button
     const laptopTab = page.locator('header button:has-text("Laptop App")');
