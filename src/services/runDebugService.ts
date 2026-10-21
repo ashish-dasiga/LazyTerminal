@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
+import { redactSecrets } from './cliDetector';
 
 export interface ProjectTaskDefinition {
   id: string;
@@ -129,7 +130,7 @@ class RunDebugManager {
   }
 
   /**
-   * Starts a project task safely without raw shell concatenation.
+   * Starts a project task safely without raw shell concatenation or DEP0190 warnings.
    */
   public startTask(
     taskId: string,
@@ -137,7 +138,6 @@ class RunDebugManager {
     args: string[] = [],
     workingDir: string = process.cwd()
   ): TaskProcessRecord {
-    // If a process with this taskId is already running, return its record
     const existing = this.activeProcesses.get(taskId);
     if (existing && existing.record.status === 'running') {
       return existing.record;
@@ -153,13 +153,25 @@ class RunDebugManager {
       portsDetected: [],
     };
 
+    if (!fs.existsSync(workingDir) || !fs.statSync(workingDir).isDirectory()) {
+      record.status = 'error';
+      record.exitCode = 1;
+      record.outputLines.push(`[Failed to launch: working directory '${workingDir}' does not exist]`);
+      this.history.set(taskId, record);
+      return record;
+    }
+
     try {
       const isWindows = process.platform === 'win32';
       const cmdLower = command.toLowerCase();
-      const needsShell = isWindows && (cmdLower === 'npm' || cmdLower === 'npx' || cmdLower.endsWith('.cmd') || cmdLower.endsWith('.bat'));
-      const proc = spawn(command, args, {
+      const isBatchCmd =
+        isWindows && (cmdLower === 'npm' || cmdLower === 'npx' || cmdLower.endsWith('.cmd') || cmdLower.endsWith('.bat'));
+      const spawnBin = isBatchCmd ? 'cmd.exe' : command;
+      const spawnArgs = isBatchCmd ? ['/d', '/s', '/c', command, ...args] : args;
+
+      const proc = spawn(spawnBin, spawnArgs, {
         cwd: workingDir,
-        shell: needsShell,
+        shell: false,
         env: { ...process.env, FORCE_COLOR: '0' },
         windowsHide: true,
       });
@@ -170,7 +182,7 @@ class RunDebugManager {
         const text = data.toString('utf-8');
         const lines = text.split(/[\r\n]+/).filter(Boolean);
         for (const line of lines) {
-          record.outputLines.push(line);
+          record.outputLines.push(redactSecrets(line));
           // Detect port bindings in logs (e.g., localhost:3000, port 5173, etc.)
           const portMatch = line.match(/(?:localhost|127\.0\.0\.1|port)\s*[:= ]\s*(\d{4,5})/i);
           if (portMatch) {
@@ -189,20 +201,23 @@ class RunDebugManager {
         const text = data.toString('utf-8');
         const lines = text.split(/[\r\n]+/).filter(Boolean);
         for (const line of lines) {
-          record.outputLines.push(`[stderr] ${line}`);
+          record.outputLines.push(`[stderr] ${redactSecrets(line)}`);
         }
       });
 
       proc.on('close', (code: number | null) => {
-        record.status = code === 0 ? 'completed' : 'error';
-        record.exitCode = code;
-        record.outputLines.push(`[Process exited with code ${code}]`);
+        if (record.status === 'running') {
+          record.status = code === 0 ? 'completed' : 'error';
+          record.exitCode = code;
+          record.outputLines.push(`[Process exited with code ${code}]`);
+        }
         this.activeProcesses.delete(taskId);
         this.history.set(taskId, record);
       });
 
       proc.on('error', (err: Error) => {
         record.status = 'error';
+        record.exitCode = 1;
         record.outputLines.push(`[Process spawn error: ${err.message}]`);
         this.activeProcesses.delete(taskId);
         this.history.set(taskId, record);
@@ -213,6 +228,7 @@ class RunDebugManager {
       return record;
     } catch (err: any) {
       record.status = 'error';
+      record.exitCode = 1;
       record.outputLines.push(`[Failed to launch: ${err.message}]`);
       this.history.set(taskId, record);
       return record;
@@ -238,6 +254,7 @@ class RunDebugManager {
       entry.record.status = 'completed';
       entry.record.outputLines.push('[Process terminated by user]');
       this.activeProcesses.delete(taskId);
+      this.history.set(taskId, entry.record);
       return true;
     } catch {
       return false;

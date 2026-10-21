@@ -1,13 +1,23 @@
 import { Router, Request, Response } from 'express';
-import { getLiveCliCatalog, inspectCliStatus, executeInstallTool } from '../services/cliDetector';
+import {
+  getLiveCliCatalog,
+  inspectCliStatus,
+  executeInstallTool,
+  getCapabilityMatrix,
+  launchCliAgent,
+} from '../services/cliDetector';
 import { runDebugManager } from '../services/runDebugService';
 import { previewManager } from '../services/previewService';
 
 export const shreyaRouter = Router();
 
 // ==========================================
-// 1. CLI TOOLING & AI AGENT ENDPOINTS
+// 1. CLI TOOLING & AI AGENT ENDPOINTS (S1-S3)
 // ==========================================
+
+shreyaRouter.get('/cli/matrix', (_req: Request, res: Response) => {
+  res.json(getCapabilityMatrix());
+});
 
 shreyaRouter.get('/cli/tools', async (_req: Request, res: Response) => {
   try {
@@ -32,6 +42,20 @@ shreyaRouter.get('/cli/check', async (req: Request, res: Response) => {
   }
 });
 
+shreyaRouter.post('/cli/launch', async (req: Request, res: Response) => {
+  try {
+    const { toolId, workingDir, args, env } = req.body || {};
+    if (!toolId) {
+      res.status(400).json({ error: 'Body parameter "toolId" is required' });
+      return;
+    }
+    const result = await launchCliAgent({ toolId, workingDir, args, env });
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 shreyaRouter.post('/cli/install', async (req: Request, res: Response) => {
   try {
     const { toolId } = req.body;
@@ -47,7 +71,7 @@ shreyaRouter.post('/cli/install', async (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 2. PREVIEW & DEV SERVER ENDPOINTS
+// 2. PREVIEW & DEV SERVER ENDPOINTS (S5)
 // ==========================================
 
 shreyaRouter.get('/preview/lan-ip', (_req: Request, res: Response) => {
@@ -70,7 +94,7 @@ shreyaRouter.post('/preview/servers/start', async (req: Request, res: Response) 
     const server = await previewManager.startDevServer(command, Number(port), workingDir);
     res.json(server);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -108,8 +132,13 @@ shreyaRouter.get('/preview/file-check', (req: Request, res: Response) => {
   res.json(result);
 });
 
+shreyaRouter.get('/preview/desktop-stream', (req: Request, res: Response) => {
+  const appId = String(req.query.appId || 'default-desktop-app');
+  res.json(previewManager.getDesktopAppStream(appId));
+});
+
 // ==========================================
-// 3. RUN / DEBUG TASK ENDPOINTS
+// 3. RUN / DEBUG TASK ENDPOINTS (S4)
 // ==========================================
 
 shreyaRouter.get('/run-debug/detect', (req: Request, res: Response) => {

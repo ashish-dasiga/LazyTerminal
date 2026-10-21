@@ -1,8 +1,9 @@
 import os from 'os';
 import net from 'net';
-import { spawn, ChildProcess } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import { spawn, ChildProcess, execFile } from 'child_process';
 import { promisify } from 'util';
-import { execFile } from 'child_process';
 import { DevServer } from '../types/relay';
 import { PythonPreviewResponse, DesktopAppStreamInfo } from './contracts';
 
@@ -12,6 +13,40 @@ export interface ActiveServerEntry {
   server: DevServer;
   process?: ChildProcess;
   startedAt: string;
+}
+
+/**
+ * Splits a command string into executable + arguments while preserving quoted strings
+ * so `shell: true` is never needed (preventing DEP0190 and command injection).
+ */
+export function tokenizeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let quoteChar: '"' | "'" | null = null;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quoteChar) {
+      if (ch === quoteChar) {
+        quoteChar = null;
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quoteChar = ch;
+    } else if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
 }
 
 class PreviewManager {
@@ -64,13 +99,27 @@ class PreviewManager {
   }
 
   /**
-   * Starts or registers a development HTTP server.
+   * Starts or registers a development HTTP server safely without shell:true deprecation warnings.
    */
   public async startDevServer(
     command: string,
     port: number,
     workingDir: string = process.cwd()
   ): Promise<DevServer> {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new Error(`Invalid preview port '${port}'. Must be an integer between 1024 and 65535.`);
+    }
+
+    const resolvedDir = path.resolve(workingDir);
+    if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
+      throw new Error(`Working directory '${resolvedDir}' does not exist.`);
+    }
+
+    const tokens = tokenizeCommand(command.trim());
+    if (tokens.length === 0) {
+      throw new Error('Preview start command cannot be empty.');
+    }
+
     const serverId = `srv-${port}`;
     const lanIp = this.getHostLanIp();
 
@@ -95,7 +144,6 @@ class PreviewManager {
     };
 
     if (portOccupied) {
-      // The server is already up (e.g. started externally or existing listener)
       this.activeServers.set(serverId, {
         server: devServer,
         startedAt: new Date().toISOString(),
@@ -103,16 +151,21 @@ class PreviewManager {
       return devServer;
     }
 
-    // Spawn dev server process
-    const isWindows = process.platform === 'win32';
-    const tokens = command.trim().split(/\s+/);
     const mainCmd = tokens[0];
     const args = tokens.slice(1);
+    const isWindows = process.platform === 'win32';
+    const cmdLower = mainCmd.toLowerCase();
+    const isBatchCmd =
+      isWindows &&
+      (cmdLower === 'npm' || cmdLower === 'npx' || cmdLower.endsWith('.cmd') || cmdLower.endsWith('.bat'));
+
+    const spawnBin = isBatchCmd ? 'cmd.exe' : mainCmd;
+    const spawnArgs = isBatchCmd ? ['/d', '/s', '/c', mainCmd, ...args] : args;
 
     try {
-      const proc = spawn(mainCmd, args, {
-        cwd: workingDir,
-        shell: isWindows,
+      const proc = spawn(spawnBin, spawnArgs, {
+        cwd: resolvedDir,
+        shell: false,
         env: { ...process.env, PORT: port.toString() },
         windowsHide: true,
       });
@@ -131,7 +184,6 @@ class PreviewManager {
         }
       });
 
-      // Give it a brief window to bind
       devServer.status = 'active';
       this.activeServers.set(serverId, {
         server: devServer,
@@ -195,7 +247,7 @@ class PreviewManager {
     } catch (err: any) {
       return {
         scriptPath,
-        exitCode: err.code || 1,
+        exitCode: typeof err.code === 'number' ? err.code : 1,
         stdout: err.stdout || '',
         stderr: err.stderr || err.message,
         executionTimeMs: Date.now() - startTime,
@@ -219,7 +271,11 @@ class PreviewManager {
       return { supported: true, category: 'python' };
     }
     if (['exe', 'app'].includes(ext || '')) {
-      return { supported: true, category: 'desktop' };
+      return {
+        supported: false,
+        category: 'desktop',
+        reason: `${fileName} is a native desktop executable. Native GUI window streaming (WebRTC/Win32 capture) is unsupported in the local-first MVP; use Web Dev Server preview instead.`,
+      };
     }
     return {
       supported: false,
@@ -229,17 +285,17 @@ class PreviewManager {
   }
 
   /**
-   * Provides stream info for desktop applications.
+   * Reports honest unsupported status for native desktop GUI streaming in MVP (Phase S5).
    */
   public getDesktopAppStream(appId: string): DesktopAppStreamInfo {
     return {
       appId,
-      appName: 'Lazy Terminal Host Companion',
-      windowTitle: 'Lazy Terminal Companion Host [PC Session]',
-      isStreamActive: true,
-      fps: 30,
-      resolution: '1280x720 (H.264 WebRTC Stream)',
-      streamUrl: `webrtc://localhost:9871/stream/${appId}`,
+      appName: 'Native Windows GUI Stream (Unsupported in MVP)',
+      windowTitle: 'Native Desktop Window Capture Unavailable',
+      isStreamActive: false,
+      fps: 0,
+      resolution: 'Unsupported in MVP (Web preview only; native Win32/WebRTC capture not enabled)',
+      streamUrl: '',
     };
   }
 }
