@@ -61,6 +61,7 @@ import {
   AiCliTool,
 } from '../types/relay';
 import { apiRequest, setSessionToken, HostUnreachableError, ApiError } from './apiClient';
+import { enqueueIntent, listIntents } from './offlineQueue';
 
 // ---------------------------------------------------------------------------
 // Master adapter
@@ -391,25 +392,11 @@ class RealSyncService implements ISyncService {
   async queueIntent(
     intent: Omit<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'>,
   ): Promise<CommandIntent> {
-    // Queueing is local-first — delegate to offlineQueue module
-    // This method exists on the adapter interface but for real mode the
-    // RelayContext / offlineQueue handles local persistence.  If a PC
-    // is available, we can optionally notify it, but queueing itself
-    // is always local.
-    const queued: CommandIntent = {
-      ...intent,
-      id: `intent-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      seq: Date.now(), // will be re-sequenced by offlineQueue
-      timestamp: Date.now(),
-      status: 'queued',
-    };
-    return queued;
+    return enqueueIntent(intent);
   }
 
   async listQueuedIntents(): Promise<CommandIntent[]> {
-    // Local-first: intents are stored in IndexedDB via offlineQueue module
-    // This adapter method is for consistency; real reads go through offlineQueue
-    return [];
+    return listIntents();
   }
 
   async reconcileIntent(

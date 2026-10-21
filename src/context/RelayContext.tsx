@@ -15,7 +15,8 @@ import {
 import { executeCommandOnDaemon } from '../services/mockDaemon';
 import {
   enqueueIntent,
-  listIntents,
+  seedOrListIntents,
+  detectDivergedIntents,
   updateIntentStatus,
   deleteIntent as deleteStoredIntent,
   clearAllIntents as clearAllStoredIntents,
@@ -656,10 +657,10 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Load persisted offline queue from IndexedDB on startup
+  // Load or seed persisted offline queue from IndexedDB on startup
   useEffect(() => {
     let mounted = true;
-    listIntents()
+    seedOrListIntents(INITIAL_INTENTS)
       .then((stored) => {
         if (mounted && stored.length > 0) {
           setIntentQueue(stored);
@@ -673,14 +674,28 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Update connection monitor when device state toggles
+  // Update connection monitor and check for state divergence when device state toggles
   useEffect(() => {
     if (device.isOnline) {
       markConnected();
+      detectDivergedIntents(
+        activeProject.branch,
+        activeProject.lastCommit.hash,
+        activeProject.name,
+      )
+        .then((updated) => {
+          if (mountedQueueHasChanges(updated)) {
+            setIntentQueue(updated);
+          }
+        })
+        .catch(() => {});
     } else {
       markDisconnected('Host offline');
     }
-  }, [device.isOnline]);
+    function mountedQueueHasChanges(updated: CommandIntent[]) {
+      return updated.length > 0;
+    }
+  }, [device.isOnline, activeProject.branch, activeProject.lastCommit.hash, activeProject.name]);
 
   // Prompt reconciliation when connected and PC comes online with pending intents
   useEffect(() => {
@@ -847,34 +862,39 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       // --- HONEST OFFLINE STATE ---
       // If PC is offline, never claim it executed. Buffer honest intent in SQLite queue!
       if (!device.isOnline) {
+        const now = Date.now();
+        const existingDup = intentQueue.find(
+          (e) =>
+            e.command === trimmedCmd &&
+            e.projectName === activeProject.name &&
+            e.status === 'queued' &&
+            Math.abs(now - e.timestamp) < 5000,
+        );
         const nextSeq =
-          intentQueue.length > 0 ? Math.max(...intentQueue.map((i) => i.seq)) + 1 : 1;
-        const newIntent: CommandIntent = {
-          id: `intent-${Date.now()}`,
+          existingDup
+            ? existingDup.seq
+            : intentQueue.length > 0
+            ? Math.max(...intentQueue.map((i) => i.seq)) + 1
+            : 1;
+        const newIntent: CommandIntent = existingDup ?? {
+          id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
           seq: nextSeq,
           command: trimmedCmd,
           workingDir: activeProject.path,
           projectName: activeProject.name,
-          timestamp: Date.now(),
+          timestamp: now,
           status: 'queued',
           causalDependencyHash: `sha256:${Math.random().toString(16).substring(2, 10)}`,
           expectedBaseBranch: activeProject.branch.replace('*', ''),
           expectedHeadCommit: activeProject.lastCommit.hash,
         };
 
-        // Persist to IndexedDB offline queue
-        enqueueIntent({
-          command: trimmedCmd,
-          workingDir: activeProject.path,
-          projectName: activeProject.name,
-          causalDependencyHash: newIntent.causalDependencyHash,
-          expectedBaseBranch: newIntent.expectedBaseBranch,
-          expectedHeadCommit: newIntent.expectedHeadCommit,
-        }).catch((err) =>
-          console.warn('[RelayContext] Failed to persist offline intent:', err)
-        );
-
-        setIntentQueue((prev) => [...prev, newIntent]);
+        if (!existingDup) {
+          enqueueIntent(newIntent).catch((err) =>
+            console.warn('[RelayContext] Failed to persist offline intent:', err)
+          );
+          setIntentQueue((prev) => [...prev, newIntent]);
+        }
 
         const bufferedLine: TerminalLine = {
           id: `buf-${Date.now()}`,
@@ -1031,31 +1051,35 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Add draft intent directly from offline screen
   const addDraftIntent = useCallback((cmd: string) => {
-    if (!cmd.trim()) return;
+    const trimmed = cmd.trim();
+    if (!trimmed) return;
+    const now = Date.now();
+    const existingDup = intentQueue.find(
+      (e) =>
+        e.command === trimmed &&
+        e.projectName === activeProject.name &&
+        e.status === 'queued' &&
+        Math.abs(now - e.timestamp) < 5000,
+    );
+    if (existingDup) return;
+
     const nextSeq =
       intentQueue.length > 0 ? Math.max(...intentQueue.map((i) => i.seq)) + 1 : 1;
     const newIntent: CommandIntent = {
-      id: `intent-${Date.now()}`,
+      id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
       seq: nextSeq,
-      command: cmd.trim(),
+      command: trimmed,
       workingDir: activeProject.path,
       projectName: activeProject.name,
-      timestamp: Date.now(),
+      timestamp: now,
       status: 'queued',
       causalDependencyHash: `sha256:${Math.random().toString(16).substring(2, 10)}`,
       expectedBaseBranch: activeProject.branch.replace('*', ''),
       expectedHeadCommit: activeProject.lastCommit.hash,
     };
 
-    // Persist to IndexedDB offline queue
-    enqueueIntent({
-      command: cmd.trim(),
-      workingDir: activeProject.path,
-      projectName: activeProject.name,
-      causalDependencyHash: newIntent.causalDependencyHash,
-      expectedBaseBranch: newIntent.expectedBaseBranch,
-      expectedHeadCommit: newIntent.expectedHeadCommit,
-    }).catch((err) =>
+    // Persist to IndexedDB offline queue with matching id & seq
+    enqueueIntent(newIntent).catch((err) =>
       console.warn('[RelayContext] Failed to persist draft intent:', err)
     );
 
@@ -1135,11 +1159,16 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   // Reconcile all intents
   const reconcileAllIntents = useCallback(
     async (_forceRun?: boolean) => {
-      const pending = intentQueue.filter((i) => i.status === 'queued' || i.status === 'diverged');
-      for (const intent of pending) {
-        await reconcileSingleIntent(intent.id, 'run');
+      setDevice((prev) => ({ ...prev, isReconciling: true }));
+      try {
+        const pending = intentQueue.filter((i) => i.status === 'queued' || i.status === 'diverged');
+        for (const intent of pending) {
+          await reconcileSingleIntent(intent.id, 'run');
+        }
+        setReconciliationPromptOpen(false);
+      } finally {
+        setDevice((prev) => ({ ...prev, isReconciling: false }));
       }
-      setReconciliationPromptOpen(false);
     },
     [intentQueue, reconcileSingleIntent]
   );

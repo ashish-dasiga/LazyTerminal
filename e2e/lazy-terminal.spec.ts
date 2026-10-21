@@ -157,4 +157,29 @@ test.describe('Lazy Terminal — E2E Suite', () => {
     await expect(page.locator('text=Enter Token Number')).toBeVisible();
   });
 
+  test('7. Offline Queue Persistence: Survives reload in IndexedDB', async ({ page }) => {
+    await pairAndConnect(page);
+
+    // Go offline via More screen
+    await page.locator('nav button:has-text("More")').click();
+    await page.locator('button:has-text("Go Offline")').click();
+
+    // Queue a distinctive command while offline
+    await page.locator('nav button:has-text("Terminal")').click();
+    const termInput = page.locator('input[placeholder*="Draft command"]');
+    await termInput.fill('cargo check --workspace');
+    await termInput.press('Enter');
+    await expect(page.locator('text=Buffered locally (PC offline)').first()).toBeVisible();
+
+    // Reload the page and pair again — queued intent must survive in IndexedDB
+    await page.reload();
+    await expect(page.locator('text=Enter Token Number')).toBeVisible({ timeout: 10000 });
+    await page.locator('button:has-text("Fill Token")').click();
+    await page.locator('button:has-text("Validate & Open Mobile UI")').click();
+
+    // Reconciliation modal should appear and list our persisted command
+    await expect(page.locator('text=PC Reconnected: State Synchronization')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('text=cargo check --workspace')).toBeVisible();
+  });
+
 });

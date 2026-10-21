@@ -1,8 +1,9 @@
 /**
- * Lazy Terminal — Persistent offline queue backed by IndexedDB.
+ * Lazy Terminal — Persistent offline queue backed by IndexedDB (with in-memory fallback for Node tests).
  *
  * Stores command intents locally so they survive page reloads and app
- * restarts.  Provides deduplication, sequencing, and state management.
+ * restarts. Provides deduplication, sequencing, divergence detection,
+ * and state management.
  *
  * Key invariants:
  * - Queued intents are NEVER auto-executed on reconnect.
@@ -17,6 +18,13 @@ import { CommandIntent, IntentStatus } from '../types/relay';
 const DB_NAME = 'lazy_terminal_offline';
 const DB_VERSION = 1;
 const STORE_NAME = 'intents';
+
+// In-memory fallback when IndexedDB is unavailable (e.g. Node.js unit test runner)
+const memoryStore = new Map<string, CommandIntent>();
+
+function hasIndexedDB(): boolean {
+  return typeof indexedDB !== 'undefined';
+}
 
 // ---------------------------------------------------------------------------
 // IndexedDB helpers
@@ -56,73 +64,85 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+async function putRecord(intent: CommandIntent): Promise<void> {
+  if (!hasIndexedDB()) {
+    memoryStore.set(intent.id, { ...intent });
+    return;
+  }
+  const db = await openDb();
+  const store = txStore(db, 'readwrite');
+  await reqToPromise(store.put(intent));
+  db.close();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+export type EnqueueIntentInput = Omit<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'> &
+  Partial<Pick<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'>>;
+
 /**
  * Add a new intent to the persistent queue.
- * Returns the created intent with an assigned id and sequence number.
+ * Preserves caller-supplied id/seq/timestamp when provided so React state
+ * and IndexedDB stay in lockstep, while deduplicating rapid identical commands.
  */
-export async function enqueueIntent(
-  partial: Omit<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'>,
-): Promise<CommandIntent> {
-  const db = await openDb();
-
-  // Get current max sequence number
-  const all = await getAllIntents(db);
+export async function enqueueIntent(partial: EnqueueIntentInput): Promise<CommandIntent> {
+  const all = await listIntents();
   const maxSeq = all.length > 0 ? Math.max(...all.map((i) => i.seq)) : 0;
+  const now = partial.timestamp ?? Date.now();
 
   // Check for duplicate: same command + same project within last 5 seconds
-  const now = Date.now();
-  const isDuplicate = all.some(
+  const existingDuplicate = all.find(
     (existing) =>
       existing.command === partial.command &&
       existing.projectName === partial.projectName &&
       existing.status === 'queued' &&
-      now - existing.timestamp < 5000,
+      Math.abs(now - existing.timestamp) < 5000,
   );
 
-  if (isDuplicate) {
-    // Return the existing queued intent rather than creating a duplicate
-    const existing = all.find(
-      (e) =>
-        e.command === partial.command &&
-        e.projectName === partial.projectName &&
-        e.status === 'queued',
-    )!;
-    db.close();
-    return existing;
+  if (existingDuplicate) {
+    return existingDuplicate;
   }
 
   const intent: CommandIntent = {
     ...partial,
-    id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
-    seq: maxSeq + 1,
+    id: partial.id ?? `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
+    seq: partial.seq ?? maxSeq + 1,
     timestamp: now,
-    status: 'queued',
+    status: partial.status ?? 'queued',
   };
 
-  const store = txStore(db, 'readwrite');
-  await reqToPromise(store.put(intent));
-  db.close();
+  await putRecord(intent);
   return intent;
 }
 
 /**
- * Read all intents from the persistent store.
+ * Seed initial intents if the persistent store is currently empty,
+ * or return the already-persisted intents.
  */
-export async function listIntents(): Promise<CommandIntent[]> {
-  const db = await openDb();
-  const result = await getAllIntents(db);
-  db.close();
-  return result;
+export async function seedOrListIntents(defaults: CommandIntent[]): Promise<CommandIntent[]> {
+  const existing = await listIntents();
+  if (existing.length > 0) {
+    return existing;
+  }
+  for (const item of defaults) {
+    await putRecord(item);
+  }
+  return listIntents();
 }
 
-async function getAllIntents(db: IDBDatabase): Promise<CommandIntent[]> {
+/**
+ * Read all intents from the persistent store, sorted by sequence number ascending.
+ */
+export async function listIntents(): Promise<CommandIntent[]> {
+  if (!hasIndexedDB()) {
+    return Array.from(memoryStore.values()).sort((a, b) => a.seq - b.seq);
+  }
+  const db = await openDb();
   const store = txStore(db, 'readonly');
   const items = await reqToPromise(store.getAll());
-  // Sort by sequence number ascending
+  db.close();
   return (items as CommandIntent[]).sort((a, b) => a.seq - b.seq);
 }
 
@@ -134,9 +154,21 @@ export async function updateIntentStatus(
   status: IntentStatus,
   extra?: Partial<Pick<CommandIntent, 'resultOutput' | 'executionDurationMs' | 'divergenceDetails'>>,
 ): Promise<CommandIntent | null> {
+  if (!hasIndexedDB()) {
+    const existing = memoryStore.get(id);
+    if (!existing) return null;
+    const updated: CommandIntent = {
+      ...existing,
+      status,
+      ...(extra || {}),
+    };
+    memoryStore.set(id, updated);
+    return updated;
+  }
+
   const db = await openDb();
   const store = txStore(db, 'readwrite');
-  const existing = await reqToPromise(store.get(id)) as CommandIntent | undefined;
+  const existing = (await reqToPromise(store.get(id))) as CommandIntent | undefined;
 
   if (!existing) {
     db.close();
@@ -155,9 +187,52 @@ export async function updateIntentStatus(
 }
 
 /**
+ * Compare queued intents against the current PC project branch and HEAD commit.
+ * Marks intents as 'diverged' when the underlying repository state changed while offline.
+ */
+export async function detectDivergedIntents(
+  actualBranch: string,
+  actualCommit: string,
+  projectName?: string,
+  dirtyFilesCount: number = 0,
+): Promise<CommandIntent[]> {
+  const cleanBranch = actualBranch.replace(/^\*/, '');
+  const all = await listIntents();
+
+  for (const intent of all) {
+    if (intent.status !== 'queued') continue;
+    if (projectName && intent.projectName !== projectName) continue;
+
+    const branchMismatch = intent.expectedBaseBranch.replace(/^\*/, '') !== cleanBranch;
+    const commitMismatch = intent.expectedHeadCommit !== actualCommit;
+
+    if (branchMismatch || commitMismatch) {
+      const reason = branchMismatch
+        ? `Target branch changed from '${intent.expectedBaseBranch}' to '${cleanBranch}' on PC.`
+        : `HEAD commit advanced from ${intent.expectedHeadCommit} to ${actualCommit} on PC.`;
+      await updateIntentStatus(intent.id, 'diverged', {
+        divergenceDetails: {
+          reason,
+          pcCurrentBranch: cleanBranch,
+          pcDirtyFiles: dirtyFilesCount,
+          diffSnippet: `expected ${intent.expectedBaseBranch}@${intent.expectedHeadCommit} -> actual ${cleanBranch}@${actualCommit}`,
+          suggestedResolution: branchMismatch ? 'skip' : 'rebase',
+        },
+      });
+    }
+  }
+
+  return listIntents();
+}
+
+/**
  * Delete a single intent from the queue.
  */
 export async function deleteIntent(id: string): Promise<void> {
+  if (!hasIndexedDB()) {
+    memoryStore.delete(id);
+    return;
+  }
   const db = await openDb();
   const store = txStore(db, 'readwrite');
   await reqToPromise(store.delete(id));
@@ -168,6 +243,10 @@ export async function deleteIntent(id: string): Promise<void> {
  * Clear all intents from the queue.
  */
 export async function clearAllIntents(): Promise<void> {
+  if (!hasIndexedDB()) {
+    memoryStore.clear();
+    return;
+  }
   const db = await openDb();
   const store = txStore(db, 'readwrite');
   await reqToPromise(store.clear());
