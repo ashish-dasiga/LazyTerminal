@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   AiCliTool,
   CommandIntent,
@@ -14,6 +14,7 @@ import {
 } from '../types/relay';
 import { executeCommandOnDaemon } from '../services/mockDaemon';
 import { getBackendAdapter, WindowsHostConnectionClient } from '../services';
+import { GitStatusResponse } from '../services/contracts';
 
 export const DEFAULT_USER: UserAccount = {
   id: 'usr_dev_7701',
@@ -457,6 +458,14 @@ interface RelayContextType {
   clearUnsavedDraft: (path: string) => void;
   fileModal: 'none' | 'new_file' | 'new_folder' | 'open_with' | 'no_file_selected';
   setFileModal: (modal: 'none' | 'new_file' | 'new_folder' | 'open_with' | 'no_file_selected') => void;
+  fileLoading: boolean;
+  fileError: string | null;
+  clearFileError: () => void;
+  loadFileContent: (filePath: string) => Promise<string>;
+  refreshFiles: (subDir?: string) => Promise<void>;
+  deleteProjectFile: (filePath: string) => Promise<void>;
+  gitStatus: GitStatusResponse | null;
+  refreshGitStatus: () => Promise<void>;
 
   // Sessions & Terminal
   sessions: TerminalSession[];
@@ -558,6 +567,13 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     cliName: string;
     installCommand: string;
   } | null>(null);
+
+  // Ashritha Subsystem 4 & 5: Live Filesystem & Git State
+  const [fileLoading, setFileLoading] = useState<boolean>(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
+  const fileHashesRef = useRef<Record<string, string>>({});
+  const clearFileError = useCallback(() => setFileError(null), []);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0];
   const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
@@ -777,43 +793,229 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     }
   }, [device.isOnline, intentQueue]);
 
-  // Save file content
-  const saveFileContent = useCallback((filePath: string, newContent: string) => {
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== activeProjectId) return p;
-
-        const updateRecursive = (files: ProjectFile[]): ProjectFile[] => {
-          return files.map((f) => {
-            if (f.path === filePath) {
-              return { ...f, content: newContent, gitStatus: 'M', modified: 'Just now' };
-            }
-            if (f.children) {
-              return { ...f, children: updateRecursive(f.children) };
-            }
-            return f;
+  // Save file content with host persistence and conflict checks
+  const saveFileContent = useCallback(
+    async (filePath: string, newContent: string) => {
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const writeRes = await getBackendAdapter().fileSystem.writeFile({
+            filePath,
+            content: newContent,
+            expectedVersionHash: fileHashesRef.current[filePath],
           });
-        };
+          if (writeRes.newHash) {
+            fileHashesRef.current[filePath] = writeRes.newHash;
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Save failed on host';
+          setFileError(msg);
+          setFileLoading(false);
+          throw err;
+        } finally {
+          setFileLoading(false);
+        }
+      }
 
-        return {
-          ...p,
-          isDirty: true,
-          dirtyCount: p.dirtyCount + 1,
-          files: updateRecursive(p.files),
-        };
-      })
-    );
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
 
-    // Clear unsaved draft so unsaved dot is removed on successful save
-    setUnsavedFiles((prev) => {
-      if (!prev[filePath]) return prev;
-      const copy = { ...prev };
-      delete copy[filePath];
-      return copy;
-    });
+          const updateRecursive = (files: ProjectFile[]): ProjectFile[] => {
+            return files.map((f) => {
+              if (f.path === filePath) {
+                return { ...f, content: newContent, gitStatus: 'M', modified: 'Just now' };
+              }
+              if (f.children) {
+                return { ...f, children: updateRecursive(f.children) };
+              }
+              return f;
+            });
+          };
 
-    setActiveFile((prev) => (prev ? { ...prev, content: newContent, gitStatus: 'M' } : null));
-  }, [activeProjectId]);
+          return {
+            ...p,
+            isDirty: true,
+            dirtyCount: p.dirtyCount + 1,
+            files: updateRecursive(p.files),
+          };
+        })
+      );
+
+      // Clear unsaved draft so unsaved dot is removed on successful save
+      setUnsavedFiles((prev) => {
+        if (!prev[filePath]) return prev;
+        const copy = { ...prev };
+        delete copy[filePath];
+        return copy;
+      });
+
+      setActiveFile((prev) => (prev ? { ...prev, content: newContent, gitStatus: 'M' } : null));
+    },
+    [activeProjectId, device.isOnline]
+  );
+
+  // Load raw file content from host
+  const loadFileContent = useCallback(
+    async (filePath: string): Promise<string> => {
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const res = (await getBackendAdapter().fileSystem.readFile({ filePath })) as {
+            content: string;
+            sizeBytes: number;
+            hash?: string;
+          };
+          if (res.hash) {
+            fileHashesRef.current[filePath] = res.hash;
+          }
+          setProjects((prev) =>
+            prev.map((p) => {
+              if (p.id !== activeProjectId) return p;
+              const updateRecursive = (files: ProjectFile[]): ProjectFile[] =>
+                files.map((f) => {
+                  if (f.path === filePath) {
+                    return {
+                      ...f,
+                      content: res.content,
+                      size: `${(res.sizeBytes / 1024).toFixed(1)} KB`,
+                    };
+                  }
+                  if (f.children) return { ...f, children: updateRecursive(f.children) };
+                  return f;
+                });
+              return { ...p, files: updateRecursive(p.files) };
+            })
+          );
+          setActiveFile((prev) =>
+            prev && prev.path === filePath ? { ...prev, content: res.content } : prev
+          );
+          return res.content;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Failed to read file from host';
+          setFileError(msg);
+          throw err;
+        } finally {
+          setFileLoading(false);
+        }
+      }
+      return '';
+    },
+    [activeProjectId, device.isOnline]
+  );
+
+  // Refresh directory files from host
+  const refreshFiles = useCallback(
+    async (subDir?: string) => {
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const items = await getBackendAdapter().fileSystem.listFiles({
+            projectPath: activeProject.path,
+            subDirectory: subDir,
+          });
+          if (items && items.length > 0) {
+            setProjects((prev) =>
+              prev.map((p) => {
+                if (p.id !== activeProjectId) return p;
+                if (!subDir) {
+                  const existingChildren = new Map(
+                    p.files.filter((f) => f.isDir && f.children).map((f) => [f.name, f.children])
+                  );
+                  const merged = items.map((item) =>
+                    item.isDir && existingChildren.has(item.name)
+                      ? { ...item, children: existingChildren.get(item.name) }
+                      : item
+                  );
+                  return { ...p, files: merged };
+                }
+                const segments = subDir.split('/').filter(Boolean);
+                const attachChildren = (list: ProjectFile[], depth: number): ProjectFile[] =>
+                  list.map((f) => {
+                    if (f.isDir && f.name === segments[depth]) {
+                      if (depth === segments.length - 1) {
+                        return { ...f, children: items };
+                      }
+                      return { ...f, children: attachChildren(f.children || [], depth + 1) };
+                    }
+                    return f;
+                  });
+                return { ...p, files: attachChildren(p.files, 0) };
+              })
+            );
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Failed to list directory from host';
+          setFileError(msg);
+        } finally {
+          setFileLoading(false);
+        }
+      }
+    },
+    [activeProject.path, activeProjectId, device.isOnline]
+  );
+
+  // Delete file or folder on host
+  const deleteProjectFile = useCallback(
+    async (filePath: string) => {
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          await getBackendAdapter().fileSystem.deleteFile({ filePath });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Failed to delete file on host';
+          setFileError(msg);
+          throw err;
+        } finally {
+          setFileLoading(false);
+        }
+      }
+
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
+          const removeRecursive = (files: ProjectFile[]): ProjectFile[] =>
+            files
+              .filter((f) => f.path !== filePath && f.name !== filePath)
+              .map((f) => (f.children ? { ...f, children: removeRecursive(f.children) } : f));
+          return { ...p, files: removeRecursive(p.files) };
+        })
+      );
+
+      setActiveFile((prev) => (prev?.path === filePath ? null : prev));
+    },
+    [activeProjectId, device.isOnline]
+  );
+
+  // Query live Git status from host
+  const refreshGitStatus = useCallback(async () => {
+    if (device.isOnline) {
+      try {
+        const status = await getBackendAdapter().git.getStatus(activeProject.path);
+        setGitStatus(status);
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.id !== activeProjectId) return p;
+            return {
+              ...p,
+              branch: status.branch,
+              isDirty: status.isDirty,
+              dirtyCount: status.dirtyFilesCount,
+              ahead: status.ahead,
+              behind: status.behind,
+              lastCommit: status.lastCommit,
+            };
+          })
+        );
+      } catch {
+        // Leave previous status intact if host is offline or not git repo
+      }
+    }
+  }, [activeProject.path, activeProjectId, device.isOnline]);
 
   // Track draft content per file
   const setUnsavedDraft = useCallback((filePath: string, draft: string, originalContent?: string) => {
@@ -839,56 +1041,110 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Create new file in active project
-  const createFile = useCallback((name: string, isTextOnly?: boolean) => {
-    const cleanName = isTextOnly && !name.includes('.') ? `${name}.txt` : name;
-    const newFile: ProjectFile = {
-      name: cleanName,
-      path: cleanName,
-      isDir: false,
-      size: '0 B',
-      modified: 'Just now',
-      gitStatus: 'U',
-      content: isTextOnly ? '# New text document\n' : '// New source file\n',
-    };
+  const createFile = useCallback(
+    async (name: string, isTextOnly?: boolean) => {
+      const cleanName = isTextOnly && !name.includes('.') ? `${name}.txt` : name;
+      let createdContent = isTextOnly ? '# New text document\n' : '// New source file\n';
 
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== activeProjectId) return p;
-        return {
-          ...p,
-          isDirty: true,
-          dirtyCount: p.dirtyCount + 1,
-          files: [...p.files, newFile],
-        };
-      })
-    );
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const res = await getBackendAdapter().fileSystem.createFile({
+            directoryPath: activeProject.path,
+            fileName: cleanName,
+            isTextOnly,
+          });
+          if (res.content) createdContent = res.content;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Create file failed on host';
+          setFileError(msg);
+        } finally {
+          setFileLoading(false);
+        }
+      }
 
-    setActiveFile(newFile);
-  }, [activeProjectId]);
+      const newFile: ProjectFile = {
+        name: cleanName,
+        path: cleanName,
+        isDir: false,
+        size: '0 B',
+        modified: 'Just now',
+        gitStatus: 'U',
+        content: createdContent,
+      };
+
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            isDirty: true,
+            dirtyCount: p.dirtyCount + 1,
+            files: [...p.files, newFile],
+          };
+        })
+      );
+
+      setActiveFile(newFile);
+    },
+    [activeProjectId, activeProject.path, device.isOnline]
+  );
+
+  // Sync live host filesystem and Git status on mount / project switch
+  useEffect(() => {
+    if (device.isOnline) {
+      refreshFiles().catch(() => {});
+      refreshGitStatus().catch(() => {});
+    }
+  }, [device.isOnline, activeProjectId, refreshFiles, refreshGitStatus]);
 
   // Create new folder in active project
-  const createFolder = useCallback((folderName: string) => {
-    const cleanName = folderName.trim();
-    if (!cleanName) return;
+  const createFolder = useCallback(
+    async (folderName: string) => {
+      const cleanName = folderName.trim();
+      if (!cleanName) return;
 
-    const newFolder: ProjectFile = {
-      name: cleanName,
-      path: cleanName,
-      isDir: true,
-      modified: 'Just now',
-      children: [],
-    };
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const fsService = getBackendAdapter().fileSystem as {
+            createFile: (req: { directoryPath: string; fileName: string; isFolder?: boolean }) => Promise<ProjectFile>;
+          };
+          await fsService.createFile({
+            directoryPath: activeProject.path,
+            fileName: cleanName,
+            isFolder: true,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Create folder failed on host';
+          setFileError(msg);
+        } finally {
+          setFileLoading(false);
+        }
+      }
 
-    setProjects((prev) =>
-      prev.map((p) => {
-        if (p.id !== activeProjectId) return p;
-        return {
-          ...p,
-          files: [...p.files, newFolder],
-        };
-      })
-    );
-  }, [activeProjectId]);
+      const newFolder: ProjectFile = {
+        name: cleanName,
+        path: cleanName,
+        isDir: true,
+        modified: 'Just now',
+        children: [],
+      };
+
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            files: [...p.files, newFolder],
+          };
+        })
+      );
+    },
+    [activeProjectId, activeProject.path, device.isOnline]
+  );
 
   // Execute terminal command
   const executeCommand = useCallback(
@@ -1354,6 +1610,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         clearUnsavedDraft,
         fileModal,
         setFileModal,
+        fileLoading,
+        fileError,
+        clearFileError,
+        loadFileContent,
+        refreshFiles,
+        deleteProjectFile,
+        gitStatus,
+        refreshGitStatus,
         sessions,
         activeSessionId,
         setActiveSessionId,

@@ -3,6 +3,8 @@ import http from 'http';
 import 'dotenv/config';
 import { createHostCompanion, HostCompanionContext } from './router';
 import { HostConfig } from './config';
+import { fsRouter } from '../server/fsRoutes';
+import { gitRouter } from '../server/gitRoutes';
 
 export interface RunningHostServer {
   app: express.Express;
@@ -18,6 +20,7 @@ export async function startHostCompanionServer(
 ): Promise<RunningHostServer> {
   const companion = createHostCompanion(customConfig, options);
   const app = express();
+  app.use(express.json({ limit: '10mb' }));
 
   app.get('/health', (_req, res) => {
     res.status(200).json({
@@ -26,6 +29,8 @@ export async function startHostCompanionServer(
     });
   });
 
+  app.use('/api/v1/fs', fsRouter);
+  app.use('/api/v1/git', gitRouter);
   app.use('/api/v1', companion.router);
 
   return new Promise<RunningHostServer>((resolve, reject) => {

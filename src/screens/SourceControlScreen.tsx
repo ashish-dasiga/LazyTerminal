@@ -1,22 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRelay } from '../context/RelayContext';
+import { getBackendAdapter } from '../services';
 import { 
   GitBranch, 
   GitCommit, 
   Check, 
   ArrowUp, 
   ArrowDown, 
-  FileCode, 
+  FileCode,
   Terminal,
   Loader2,
-  CheckCircle2
+  CheckCircle2,
+  AlertCircle,
+  X,
+  FileDiff
 } from 'lucide-react';
 
 export function SourceControlScreen() {
   const { 
     activeProject, 
     executeCommand, 
-    setMobileNav 
+    setMobileNav,
+    gitStatus,
+    refreshGitStatus
   } = useRelay();
 
   const [commitMessage, setCommitMessage] = useState('');
@@ -26,47 +32,171 @@ export function SourceControlScreen() {
   const [selectedBranch, setSelectedBranch] = useState(activeProject.branch);
   const [showBranchModal, setShowBranchModal] = useState(false);
   const [newBranchInput, setNewBranchInput] = useState('');
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [activeDiff, setActiveDiff] = useState<{ file: string; content: string } | null>(null);
+  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
 
-  const branches = ['main', 'dev', 'feature/reconciliation-engine', 'release/v1.4'];
+  const [branches, setBranches] = useState<string[]>([
+    'main',
+    'ashritha',
+    'deeksha',
+    'ashish',
+    'shreya'
+  ]);
+
+  // Sync git status on screen load
+  useEffect(() => {
+    refreshGitStatus().catch(() => {});
+    // Try fetching branches from host
+    const fetchBranches = async () => {
+      try {
+        const httpGit = getBackendAdapter().git as { getBranches?: (p: string) => Promise<{ branches: string[]; currentBranch: string }> };
+        if (httpGit.getBranches) {
+          const res = await httpGit.getBranches(activeProject.path);
+          if (res.branches && res.branches.length > 0) {
+            setBranches(res.branches);
+            if (res.currentBranch) setSelectedBranch(res.currentBranch);
+          }
+        }
+      } catch {
+        // Fallback to initial branches
+      }
+    };
+    fetchBranches();
+  }, [activeProject.path, refreshGitStatus]);
 
   const handleStageAllAndCommit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!commitMessage.trim()) return;
     setIsCommitting(true);
-    await executeCommand(`git add -A`);
-    await executeCommand(`git commit -m "${commitMessage.trim()}"`);
-    setCommitMessage('');
-    setIsCommitting(false);
+    setGitError(null);
+    try {
+      const httpGit = getBackendAdapter().git as {
+        stageFiles: (files: string[], projectPath?: string) => Promise<void>;
+        commit: (req: { projectPath: string; message: string }) => Promise<unknown>;
+      };
+      await httpGit.stageFiles(['.'], activeProject.path);
+      await httpGit.commit({
+        projectPath: activeProject.path,
+        message: commitMessage.trim(),
+      });
+      setCommitMessage('');
+      await refreshGitStatus();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Commit failed';
+      setGitError(msg);
+      // Fallback through terminal
+      await executeCommand(`git add -A`);
+      await executeCommand(`git commit -m "${commitMessage.trim()}"`);
+    } finally {
+      setIsCommitting(false);
+    }
   };
 
   const handlePush = async () => {
     setIsPushing(true);
-    await executeCommand('git push');
-    setIsPushing(false);
+    setGitError(null);
+    try {
+      const httpGit = getBackendAdapter().git as { push: (b?: string, p?: string) => Promise<unknown> };
+      await httpGit.push(undefined, activeProject.path);
+      await refreshGitStatus();
+    } catch (err: unknown) {
+      setGitError(err instanceof Error ? err.message : 'Push failed');
+      await executeCommand('git push');
+    } finally {
+      setIsPushing(false);
+    }
   };
 
   const handlePull = async () => {
     setIsPulling(true);
-    await executeCommand('git pull');
-    setIsPulling(false);
+    setGitError(null);
+    try {
+      const httpGit = getBackendAdapter().git as { pull: (b?: string, p?: string) => Promise<unknown> };
+      await httpGit.pull(undefined, activeProject.path);
+      await refreshGitStatus();
+    } catch (err: unknown) {
+      setGitError(err instanceof Error ? err.message : 'Pull failed');
+      await executeCommand('git pull');
+    } finally {
+      setIsPulling(false);
+    }
   };
 
   const handleSwitchBranch = async (branch: string) => {
-    await executeCommand(`git checkout ${branch}`);
-    setSelectedBranch(branch);
-    setShowBranchModal(false);
+    setGitError(null);
+    try {
+      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
+      await httpGit.switchBranch(branch, activeProject.path, false);
+      setSelectedBranch(branch);
+      setShowBranchModal(false);
+      await refreshGitStatus();
+    } catch (err: unknown) {
+      setGitError(err instanceof Error ? err.message : 'Failed to switch branch');
+      await executeCommand(`git checkout ${branch}`);
+      setSelectedBranch(branch);
+      setShowBranchModal(false);
+    }
   };
 
   const handleCreateBranch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newBranchInput.trim()) return;
-    await executeCommand(`git checkout -b ${newBranchInput.trim()}`);
-    setSelectedBranch(newBranchInput.trim());
-    setNewBranchInput('');
-    setShowBranchModal(false);
+    const targetBranch = newBranchInput.trim();
+    if (!targetBranch) return;
+    setGitError(null);
+    try {
+      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
+      await httpGit.switchBranch(targetBranch, activeProject.path, true);
+      setBranches((prev) => (prev.includes(targetBranch) ? prev : [...prev, targetBranch]));
+      setSelectedBranch(targetBranch);
+      setNewBranchInput('');
+      setShowBranchModal(false);
+      await refreshGitStatus();
+    } catch (err: unknown) {
+      setGitError(err instanceof Error ? err.message : 'Failed to create branch');
+    }
   };
 
-  const dirtyFiles = activeProject.files.filter((f) => f.gitStatus === 'M' || f.gitStatus === 'U');
+  const handleInspectDiff = async (fileName: string) => {
+    setIsLoadingDiff(true);
+    try {
+      const httpGit = getBackendAdapter().git as { getDiff?: (p: string, f?: string) => Promise<string> };
+      if (httpGit.getDiff) {
+        const diff = await httpGit.getDiff(activeProject.path, fileName);
+        setActiveDiff({ file: fileName, content: diff || 'No working directory changes for this file.' });
+      } else {
+        await executeCommand(`git diff ${fileName}`);
+        setMobileNav('terminal');
+      }
+    } catch {
+      await executeCommand(`git diff ${fileName}`);
+      setMobileNav('terminal');
+    } finally {
+      setIsLoadingDiff(false);
+    }
+  };
+
+  // Files to display: prefer real gitStatus.changedFiles, fallback to activeProject.files
+  const dirtyFiles = gitStatus
+    ? gitStatus.changedFiles.map((cf) => ({
+        name: cf.path,
+        path: cf.path,
+        gitStatus: cf.status,
+        staged: cf.staged,
+      }))
+    : activeProject.files
+        .filter((f) => f.gitStatus === 'M' || f.gitStatus === 'U')
+        .map((f) => ({
+          name: f.name,
+          path: f.path,
+          gitStatus: f.gitStatus || 'M',
+          staged: false,
+        }));
+
+  const currentBranchName = gitStatus?.branch || activeProject.branch;
+  const aheadCount = gitStatus?.ahead ?? activeProject.ahead;
+  const behindCount = gitStatus?.behind ?? activeProject.behind;
+  const lastCommitInfo = gitStatus?.lastCommit || activeProject.lastCommit;
 
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#121419] text-zinc-100 font-sans">
@@ -88,20 +218,33 @@ export function SourceControlScreen() {
           className="px-2.5 py-1 bg-[#1c1f26] hover:bg-[#232731] border border-[#2b303b] rounded-md text-xs font-mono text-zinc-200 flex items-center gap-1.5 cursor-pointer transition-colors"
         >
           <GitBranch className="w-3.5 h-3.5 text-zinc-400" />
-          <span>{activeProject.branch.replace('*', '')}</span>
+          <span>{currentBranchName.replace('*', '')}</span>
         </button>
       </div>
+
+      {/* Git Error Banner */}
+      {gitError && (
+        <div className="p-3 bg-red-950/80 border border-red-800/60 rounded-lg flex items-center justify-between text-xs font-mono text-red-200">
+          <div className="flex items-center gap-2 truncate">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span className="truncate">{gitError}</span>
+          </div>
+          <button onClick={() => setGitError(null)} className="p-1 text-red-400 hover:text-white cursor-pointer">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Sync Status Bar */}
       <div className="p-3 bg-[#16181e] border border-[#252831] rounded-lg flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs font-mono">
           <span className="text-zinc-400">Sync:</span>
           <span className="text-emerald-400 flex items-center gap-0.5">
-            <ArrowUp className="w-3 h-3" /> {activeProject.ahead} ahead
+            <ArrowUp className="w-3 h-3" /> {aheadCount} ahead
           </span>
           <span className="text-zinc-600">·</span>
           <span className="text-zinc-400 flex items-center gap-0.5">
-            <ArrowDown className="w-3 h-3" /> {activeProject.behind} behind
+            <ArrowDown className="w-3 h-3" /> {behindCount} behind
           </span>
         </div>
 
@@ -185,7 +328,7 @@ export function SourceControlScreen() {
         ) : (
           dirtyFiles.map((file) => (
             <div
-              key={file.name}
+              key={`${file.path}-${file.staged ? 'staged' : 'unstaged'}`}
               className="p-2.5 bg-[#16181e] border border-[#252831] rounded-lg flex items-center justify-between text-xs font-mono"
             >
               <div className="flex items-center gap-2.5 truncate">
@@ -199,12 +342,10 @@ export function SourceControlScreen() {
                   {file.gitStatus === 'M' ? 'Modified' : 'Untracked'}
                 </span>
                 <button
-                  onClick={() => {
-                    executeCommand(`git diff ${file.name}`);
-                    setMobileNav('terminal');
-                  }}
+                  onClick={() => handleInspectDiff(file.name)}
+                  disabled={isLoadingDiff}
                   className="text-blue-400 hover:text-blue-300 cursor-pointer p-1"
-                  title="Inspect diff in terminal"
+                  title="Inspect diff"
                 >
                   Diff
                 </button>
@@ -214,19 +355,50 @@ export function SourceControlScreen() {
         )}
       </div>
 
+      {/* Inline Diff Viewer Modal */}
+      {activeDiff && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-[#181a21] border border-[#2b303b] rounded-lg max-w-xl w-full p-4 space-y-3 shadow-xl max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-[#242730] pb-2 shrink-0">
+              <div className="flex items-center gap-2 text-zinc-200">
+                <FileDiff className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-semibold text-white">Diff: {activeDiff.file}</h3>
+              </div>
+              <button
+                onClick={() => setActiveDiff(null)}
+                className="text-zinc-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-3 bg-[#111318] rounded border border-[#242730] text-xs font-mono text-zinc-300 whitespace-pre leading-relaxed selection:bg-blue-600/30">
+              {activeDiff.content}
+            </pre>
+            <div className="flex justify-end pt-2 border-t border-[#242730] shrink-0">
+              <button
+                onClick={() => setActiveDiff(null)}
+                className="px-3 py-1.5 text-xs bg-[#1c1f26] hover:bg-[#232731] text-zinc-200 border border-[#2b303b] rounded-md cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Last Commit Summary */}
       <div className="p-3 bg-[#16181e] border border-[#252831] rounded-lg space-y-1 text-xs">
         <div className="text-[11px] text-zinc-400 flex items-center gap-1">
           <GitCommit className="w-3.5 h-3.5 text-zinc-500" />
-          <span>Latest Commit on {activeProject.branch.replace('*', '')}</span>
+          <span>Latest Commit on {currentBranchName.replace('*', '')}</span>
         </div>
-        <div className="text-zinc-200 font-medium">{activeProject.lastCommit.message}</div>
+        <div className="text-zinc-200 font-medium">{lastCommitInfo.message || 'No commit message'}</div>
         <div className="text-[11px] text-zinc-500 font-mono flex items-center gap-2 pt-0.5">
-          <span>{activeProject.lastCommit.hash}</span>
+          <span>{lastCommitInfo.hash || 'HEAD'}</span>
           <span>·</span>
-          <span>{activeProject.lastCommit.author}</span>
+          <span>{lastCommitInfo.author || 'Lazy Terminal'}</span>
           <span>·</span>
-          <span>{activeProject.lastCommit.time}</span>
+          <span>{lastCommitInfo.time || 'just now'}</span>
         </div>
       </div>
 
