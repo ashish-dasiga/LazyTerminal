@@ -19,11 +19,13 @@ Update this file at the end of every phase.
   - `src/screens/SourceControlScreen.tsx`: Real Git status, branch switcher/creator, diff inspection, error alerts
   - `tests/fsGit.test.ts`: Automated test suite for traversal security, atomic writes, conflict checks, Git operations
   - `tests/hostApi.test.ts`: Automated HTTP integration test for REST endpoints
-  - `package.json`: Added `test` script running both test suites
+  - `tests/e2ePlaywright.test.ts`: Playwright end-to-end browser verification suite
+  - `package.json`: Added `test` and `test:e2e` scripts
 
 ## Verification
 - Commands run:
   - `npm test`: Runs `tests/fsGit.test.ts` and `tests/hostApi.test.ts` (All passed)
+  - `npm run test:e2e`: Runs Playwright headless Chromium end-to-end test (100% passed)
   - `npm run lint`: `tsc --noEmit` (0 errors)
   - `npm run build`: `vite build` (0 errors, bundle compiled)
 - Actual results:
@@ -31,9 +33,11 @@ Update this file at the end of every phase.
   - Safe operations: read, SHA-256 hash, conflict rejection, and atomic write passed
   - Git operations: init, status, stage, commit, branch switch, diff passed
   - HTTP endpoints: `/api/v1/fs/list`, `/read`, `/write`, `/api/v1/git/status`, `/branches` 200 OK
+  - Playwright E2E: Verified connection flow, Explorer file rendering, Code editor toolbar, and Source Control header/commit/branch indicators
 - Tests added:
   - `tests/fsGit.test.ts`
   - `tests/hostApi.test.ts`
+  - `tests/e2ePlaywright.test.ts`
 - Manual test steps:
   1. Start host companion backend: `npx tsx server.ts`
   2. Start frontend development server: `npm run dev`
