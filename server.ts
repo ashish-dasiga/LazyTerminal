@@ -6,6 +6,7 @@ import fs from 'fs';
 import { createHostCompanion } from './src/host/router';
 import { fsRouter } from './src/server/fsRoutes';
 import { gitRouter } from './src/server/gitRoutes';
+import { shreyaRouter } from './src/server/shreyaRouter';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,9 +41,10 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
-// Mount Subsystem 4 (Filesystem), Subsystem 5 (Git), and Host Companion APIs
+// Mount Subsystem 4 (Filesystem), Subsystem 5 (Git), Shreya (CLI/Run/Preview), and Host Companion APIs
 app.use('/api/v1/fs', fsRouter);
 app.use('/api/v1/git', gitRouter);
+app.use('/api/v1', shreyaRouter);
 app.use('/api/v1', hostCompanion.router);
 
 // Serve static assets from dist when built

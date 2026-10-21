@@ -5,6 +5,7 @@ import { createHostCompanion, HostCompanionContext } from './router';
 import { HostConfig } from './config';
 import { fsRouter } from '../server/fsRoutes';
 import { gitRouter } from '../server/gitRoutes';
+import { shreyaRouter } from '../server/shreyaRouter';
 
 export interface RunningHostServer {
   app: express.Express;
@@ -31,6 +32,7 @@ export async function startHostCompanionServer(
 
   app.use('/api/v1/fs', fsRouter);
   app.use('/api/v1/git', gitRouter);
+  app.use('/api/v1', shreyaRouter);
   app.use('/api/v1', companion.router);
 
   return new Promise<RunningHostServer>((resolve, reject) => {
