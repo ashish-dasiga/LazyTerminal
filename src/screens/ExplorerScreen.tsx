@@ -19,7 +19,9 @@ import {
   ArrowLeft,
   Terminal,
   ExternalLink,
-  AlertCircle
+  AlertCircle,
+  Trash2,
+  Loader2
 } from 'lucide-react';
 
 export function ExplorerScreen() {
@@ -35,7 +37,13 @@ export function ExplorerScreen() {
     fileModal,
     setFileModal,
     setMobileNav,
-    executeCommand
+    executeCommand,
+    loadFileContent,
+    deleteProjectFile,
+    fileLoading,
+    fileError,
+    clearFileError,
+    refreshFiles
   } = useRelay();
 
   // Navigation path stack inside current project
@@ -54,6 +62,10 @@ export function ExplorerScreen() {
 
   // Three-dot file action menu
   const [activeFileMenu, setActiveFileMenu] = useState<ProjectFile | null>(null);
+
+  // File deletion state
+  const [fileToDelete, setFileToDelete] = useState<ProjectFile | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
 
   // Sync editor content when activeFile changes or unsaved drafts exist
   useEffect(() => {
@@ -87,10 +99,21 @@ export function ExplorerScreen() {
     setCurrentDirStack((prev) => prev.slice(0, prev.length - 1));
   };
 
-  const handleOpenFile = (file: ProjectFile) => {
+  const handleOpenFile = async (file: ProjectFile) => {
     setActiveFile(file);
     const draft = unsavedFiles[file.path];
-    setEditingContent(draft !== undefined ? draft : (file.content || `// Content of ${file.name}\n`));
+    if (draft !== undefined) {
+      setEditingContent(draft);
+    } else if (file.content !== undefined) {
+      setEditingContent(file.content);
+    } else {
+      try {
+        const loaded = await loadFileContent(file.path);
+        setEditingContent(loaded);
+      } catch {
+        setEditingContent(`// Content of ${file.name}\n`);
+      }
+    }
     setIsEditing(false);
   };
 
@@ -101,15 +124,28 @@ export function ExplorerScreen() {
     }
   };
 
-  const handleSaveFile = () => {
+  const handleSaveFile = async () => {
     if (!activeFile) return;
     try {
-      saveFileContent(activeFile.path, editingContent);
+      await saveFileContent(activeFile.path, editingContent);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
     } catch (err) {
       // If saving fails, unsaved indicator remains intact
       console.error('Save failed:', err);
+    }
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!fileToDelete) return;
+    setIsDeleting(true);
+    try {
+      await deleteProjectFile(fileToDelete.path);
+      setFileToDelete(null);
+    } catch (err) {
+      console.error('Delete failed:', err);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -174,6 +210,11 @@ export function ExplorerScreen() {
 
         {/* Action Buttons: New File / New Folder */}
         <div className="flex items-center gap-1.5">
+          {fileLoading && (
+            <span title="Host file system syncing...">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-400 mr-1" />
+            </span>
+          )}
           <button
             onClick={() => {
               setIsTextFileOnly(false);
@@ -197,6 +238,23 @@ export function ExplorerScreen() {
           </button>
         </div>
       </div>
+
+      {/* Host Filesystem Error Banner */}
+      {fileError && (
+        <div className="px-3 py-2 bg-red-950/80 border-b border-red-800/60 flex items-center justify-between text-xs font-mono text-red-200 shrink-0">
+          <div className="flex items-center gap-2 truncate">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span className="truncate">{fileError}</span>
+          </div>
+          <button
+            onClick={clearFileError}
+            className="p-1 text-red-400 hover:text-white rounded cursor-pointer"
+            title="Dismiss error"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* 2. Main Content: Split between File List & File Editor/Viewer */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -405,6 +463,16 @@ export function ExplorerScreen() {
                               >
                                 <Edit3 className="w-3.5 h-3.5 text-zinc-400" />
                                 <span>Edit Content</span>
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setFileToDelete(item);
+                                  setActiveFileMenu(null);
+                                }}
+                                className="w-full px-2 py-1.5 text-left rounded hover:bg-red-900/30 text-red-400 hover:text-red-300 flex items-center gap-2 cursor-pointer border-t border-[#242732]"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                <span>Delete File</span>
                               </button>
                             </div>
                           </>
@@ -650,6 +718,49 @@ export function ExplorerScreen() {
                 className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-md text-xs cursor-pointer"
               >
                 Browse Files
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. Delete File Confirmation Modal */}
+      {fileToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-100">
+          <div className="bg-[#181a21] border border-[#2b303b] rounded-lg max-w-sm w-full p-4 space-y-3 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-red-400">
+                <Trash2 className="w-4 h-4" />
+                <h3 className="text-sm font-semibold text-white">Delete File</h3>
+              </div>
+              <button
+                onClick={() => setFileToDelete(null)}
+                className="text-zinc-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Are you sure you want to delete <span className="font-mono text-white font-medium">{fileToDelete.name}</span> on the Windows PC? This action cannot be undone.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#242730]">
+              <button
+                type="button"
+                onClick={() => setFileToDelete(null)}
+                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteConfirm}
+                disabled={isDeleting}
+                className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white font-medium rounded-md text-xs cursor-pointer transition-colors flex items-center gap-1.5"
+              >
+                {isDeleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                <span>Delete</span>
               </button>
             </div>
           </div>
