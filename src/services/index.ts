@@ -1,20 +1,31 @@
 import { IRelayBackendAdapter } from './contracts';
 import { MockRelayBackendAdapter } from './mockAdapter';
-import { RealRelayBackendAdapter } from './realBackendAdapter';
+import { RealRelayBackendAdapter } from './realAdapter';
+import { getAppConfig } from './config';
 
 export * from './contracts';
 export * from './mockAdapter';
 export * from './mockDaemon';
 export * from './hostClientAdapter';
 export * from './httpServices';
-export * from './realBackendAdapter';
+export * from './realAdapter';
+export * from './config';
+export * from './apiClient';
+export * from './offlineQueue';
+export * from './connectionMonitor';
 
 /**
  * Global singleton adapter instance.
- * Automatically initializes RealRelayBackendAdapter when running against the host companion,
+ *
+ * Defaults to RealRelayBackendAdapter when running against the host companion,
  * and allows easy switching.
  */
-let activeAdapter: IRelayBackendAdapter = new RealRelayBackendAdapter();
+function createAdapter(): IRelayBackendAdapter {
+  const config = getAppConfig();
+  return new RealRelayBackendAdapter(config.hostBaseUrl);
+}
+
+let activeAdapter: IRelayBackendAdapter = createAdapter();
 
 export function getBackendAdapter(): IRelayBackendAdapter {
   return activeAdapter;
@@ -30,4 +41,9 @@ export function useMockAdapter(): void {
 
 export function useRealAdapter(hostUrl?: string): void {
   activeAdapter = new RealRelayBackendAdapter(hostUrl);
+}
+
+export function reinitializeAdapter(): IRelayBackendAdapter {
+  activeAdapter = createAdapter();
+  return activeAdapter;
 }
