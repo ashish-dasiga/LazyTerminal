@@ -1,0 +1,18 @@
+{
+  "short_name": "LazyTerminal",
+  "name": "Lazy Terminal — Remote Dev Companion",
+  "description": "Mobile-first, local-first Android + Windows PC development companion with persistent terminal, filesystem editor, Git sync, and AI coding agents",
+  "icons": [
+    {
+      "src": "/icon.jpeg",
+      "type": "image/jpeg",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/?source=pwa",
+  "background_color": "#07080a",
+  "theme_color": "#07080a",
+  "display": "standalone",
+  "orientation": "portrait"
+}
