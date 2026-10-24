@@ -5,15 +5,15 @@ async function pairAndConnect(page: any) {
   await page.goto('/?view=mobile');
 
   // Wait for the connection screen
-  await expect(page.locator('text=Enter Token Number')).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('text=Connect to Windows PC')).toBeVisible({ timeout: 10000 });
 
-  // Use the autofill button
-  const fillTokenBtn = page.locator('button:has-text("Fill Token")');
-  await fillTokenBtn.click();
+  // Fill Pairing Code
+  const tokenInput = page.locator('input[aria-label="Pairing Code"], input[type="text"]').first();
+  await tokenInput.fill('784-291');
 
-  // Click Validate & Open Mobile UI
-  const validateBtn = page.locator('button:has-text("Validate & Open Mobile UI")');
-  await validateBtn.click();
+  // Click Connect to PC
+  const connectBtn = page.locator('button:has-text("Connect to PC"), button[type="submit"]').first();
+  await connectBtn.click();
 
   // Verify transition to connected Terminal screen
   await expect(page.locator('text=DESKTOP-WIN11-PRO').first()).toBeVisible({ timeout: 10000 });
@@ -32,17 +32,15 @@ test.describe('Lazy Terminal — E2E Suite', () => {
   test('1. Full Pairing Flow: Enter token and connect to Terminal workspace', async ({ page }) => {
     await page.goto('/?view=mobile');
 
-    // Top application bar
-    await expect(page.locator('header').locator('text=Remote Development System')).toBeVisible();
-
     // Box header
-    await expect(page.locator('text=Enter Token Number')).toBeVisible();
+    await expect(page.locator('text=Connect to Windows PC')).toBeVisible();
 
-    // Fill Token
-    await page.locator('button:has-text("Fill Token")').click();
+    // Fill Pairing Code
+    const tokenInput = page.locator('input[aria-label="Pairing Code"], input[type="text"]').first();
+    await tokenInput.fill('784-291');
 
     // Click submit
-    await page.locator('button:has-text("Validate & Open Mobile UI")').click();
+    await page.locator('button:has-text("Connect to PC"), button[type="submit"]').first().click();
 
     // Verify connected terminal workspace
     await expect(page.locator('text=DESKTOP-WIN11-PRO').first()).toBeVisible({ timeout: 10000 });

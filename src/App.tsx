@@ -75,53 +75,11 @@ function AppContent() {
 
   return (
     <div className="h-screen h-[100dvh] bg-[#07080a] text-zinc-100 flex flex-col font-sans select-none overflow-hidden">
-      {/* Dev Bar (Only visible when explicit ?view= or ?dev= is set) */}
-      <header className="h-10 bg-[#10131a] border-b border-[#202534] px-4 flex items-center justify-between z-40 shrink-0 text-xs">
-        <div className="flex items-center gap-2">
-          <img
-            src="./icon.jpeg"
-            alt="Lazy Terminal"
-            className="w-4 h-4 rounded object-cover border border-[#2b3040]"
-          />
-          <span className="font-semibold text-zinc-200">Lazy Terminal Simulator</span>
-        </div>
-
-        <div className="flex items-center p-0.5 bg-[#171b24] border border-[#262c3a] rounded text-[11px]">
-          <button
-            onClick={() => setActiveFrontend('portal')}
-            className={`px-2.5 py-0.5 rounded cursor-pointer flex items-center gap-1 ${
-              activeFrontend === 'portal' ? 'bg-[#262c3a] text-white font-medium' : 'text-zinc-400'
-            }`}
-          >
-            <Download className="w-3 h-3 text-blue-400" />
-            <span>Install Apps</span>
-          </button>
-          <button
-            onClick={() => setActiveFrontend('mobile')}
-            className={`px-2.5 py-0.5 rounded cursor-pointer flex items-center gap-1 ${
-              activeFrontend === 'mobile' ? 'bg-[#262c3a] text-white font-medium' : 'text-zinc-400'
-            }`}
-          >
-            <Smartphone className="w-3 h-3" />
-            <span>Mobile App (Android)</span>
-          </button>
-          <button
-            onClick={() => setActiveFrontend('laptop')}
-            className={`px-2.5 py-0.5 rounded cursor-pointer flex items-center gap-1 ${
-              activeFrontend === 'laptop' ? 'bg-[#262c3a] text-white font-medium' : 'text-zinc-400'
-            }`}
-          >
-            <Laptop className="w-3 h-3" />
-            <span>Laptop App (Windows)</span>
-          </button>
-        </div>
-      </header>
-
       {/* Main Viewport */}
       {activeFrontend === 'portal' ? (
         <SimpleDownloadPortal />
       ) : (
-        <div className="flex-1 flex items-center justify-center p-2 md:p-3 overflow-hidden bg-[#0a0c10] min-h-0">
+        <div className="flex-1 flex items-center justify-center p-0 md:p-3 overflow-hidden bg-[#07080a] min-h-0">
           {activeFrontend === 'laptop' ? (
             <div className="w-full h-full max-w-7xl max-h-[96vh] rounded-none md:rounded-xl border border-[#272a33] shadow-2xl overflow-hidden flex flex-col bg-[#14161c]">
               <LaptopApp />

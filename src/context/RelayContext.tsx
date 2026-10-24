@@ -542,7 +542,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_USER);
   const [connectionStep, setConnectionStep] = useState<MobileConnectionStep>('enter_key');
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [generatedConnectionKey, setGeneratedConnectionKey] = useState<string>('784-291');
+  const [generatedConnectionKey, setGeneratedConnectionKey] = useState<string>('');
 
   // Mobile drawer & navigation
   const [mobileNav, setMobileNav] = useState<MobileNavSection>('terminal');
@@ -559,7 +559,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     pingMs: 18,
     pairedAt: 'October 12, 2026',
     ed25519Fingerprint: 'SHA256:4b7f8c2e91a0...93d8',
-    pairingToken: '784-291',
+    pairingToken: '',
     sqliteDbSizeKb: 142,
     backendServerStatus: 'running',
     tunnelStatus: 'idle',
@@ -745,7 +745,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     } else {
       setConnectionStep('enter_key');
       setConnectionError(
-        `Incorrect token number "${key}". Please enter the token shown in the laptop app (${generatedConnectionKey}).`
+        `Incorrect pairing code "${key}". Please enter the 6-digit code shown on your Windows companion app.`
       );
       return false;
     }
