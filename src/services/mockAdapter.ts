@@ -139,7 +139,7 @@ class MockAuthService implements IAuthService {
 // 2. Mock Connection Service
 // ----------------------------------------------------------------------------
 class MockConnectionService implements IConnectionService {
-  private activeKey = '784-291';
+  private activeKey = '';
   private deviceInfo: DeviceInfo = {
     isOnline: true,
     deviceName: 'DESKTOP-WIN11-PRO',
@@ -150,7 +150,7 @@ class MockConnectionService implements IConnectionService {
     pingMs: 18,
     pairedAt: 'October 12, 2026',
     ed25519Fingerprint: 'SHA256:4b7f8c2e91a0...93d8',
-    pairingToken: '784-291',
+    pairingToken: '',
     sqliteDbSizeKb: 142,
     backendServerStatus: 'running',
     tunnelStatus: 'active',
@@ -173,6 +173,9 @@ class MockConnectionService implements IConnectionService {
   }
 
   async fetchActiveHostKey(): Promise<{ pairingKey: string; expiresInSeconds: number }> {
+    if (!this.activeKey) {
+      await this.generateHostKey();
+    }
     return {
       pairingKey: this.activeKey,
       expiresInSeconds: 300,
@@ -182,8 +185,8 @@ class MockConnectionService implements IConnectionService {
   async validatePairingKey(req: ValidateKeyRequest): Promise<ValidateKeyResponse> {
     await new Promise((r) => setTimeout(r, 450));
     const cleanInput = req.pairingKey.replace(/\D/g, '');
-    const cleanTarget = this.activeKey.replace(/\D/g, '');
-    if (cleanInput === cleanTarget || cleanInput === '784291') {
+    const cleanTarget = this.activeKey ? this.activeKey.replace(/\D/g, '') : '';
+    if (cleanTarget && cleanInput === cleanTarget) {
       return { isValid: true, targetDeviceName: this.deviceInfo.deviceName };
     }
     return {

@@ -1,16 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useRelay } from '../context/RelayContext';
 import { 
-  Key, 
-  Lock, 
-  Laptop, 
   ArrowRight, 
   AlertCircle, 
   Loader2, 
   ShieldCheck,
-  Check,
-  Wifi,
-  BatteryMedium
+  RefreshCw
 } from 'lucide-react';
 
 export function MobileConnectionFlow() {
@@ -18,159 +13,186 @@ export function MobileConnectionFlow() {
     connectionStep, 
     connectionError, 
     setConnectionError, 
-    connectWithKey, 
-    generatedConnectionKey,
-    setActiveFrontend
+    connectWithKey 
   } = useRelay();
 
   const [tokenInput, setTokenInput] = useState('');
-  const [isVerifying, setIsVerifying] = useState(false);
+  const [localValidation, setLocalValidation] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const isVerifying = connectionStep === 'connecting';
+
+  // Format token cleanly as user types: digits only, insert hyphen after 3 digits
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value.replace(/[^\d-]/g, '');
+    const digits = raw.replace(/\D/g, '').slice(0, 6);
+    let formatted = digits;
+    if (digits.length > 3) {
+      formatted = `${digits.slice(0, 3)}-${digits.slice(3)}`;
+    }
+
+    setTokenInput(formatted);
+    if (localValidation) setLocalValidation(null);
+    if (connectionError) setConnectionError(null);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!tokenInput.trim()) return;
+    if (isVerifying) return;
 
-    setIsVerifying(true);
-    await connectWithKey(tokenInput.trim());
-    setIsVerifying(false);
+    const trimmed = tokenInput.trim();
+    if (!trimmed) {
+      setLocalValidation('Please enter the 6-digit pairing code.');
+      inputRef.current?.focus();
+      return;
+    }
+
+    const digitsOnly = trimmed.replace(/\D/g, '');
+    if (digitsOnly.length !== 6) {
+      setLocalValidation('Pairing code must be 6 digits (e.g. 123-456).');
+      inputRef.current?.focus();
+      return;
+    }
+
+    setLocalValidation(null);
+    await connectWithKey(trimmed);
   };
 
-  const handleAutoFill = () => {
-    setTokenInput(generatedConnectionKey);
+  const handleRetry = () => {
     setConnectionError(null);
+    setLocalValidation(null);
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
   };
+
+  const activeError = localValidation || connectionError;
 
   return (
-    <div className="flex-1 flex flex-col justify-between p-4 sm:p-5 bg-[#121419] text-zinc-100 font-sans select-none overflow-y-auto">
-      {/* Android Phone Top Status Bar */}
-      <div className="flex items-center justify-between text-xs text-zinc-400 font-mono pt-1 pb-3 px-1 border-b border-[#20232b]">
-        <div className="flex items-center gap-1.5 font-semibold text-zinc-300">
-          <span>09:41</span>
-        </div>
-        <div className="flex items-center gap-2 text-zinc-400 text-[11px]">
-          <span>5G</span>
-          <Wifi className="w-3.5 h-3.5 text-zinc-400" />
-          <BatteryMedium className="w-4 h-4 text-zinc-400" />
-        </div>
+    <div className="relative flex-1 flex flex-col justify-between p-4 sm:p-6 bg-[#0e1015] text-zinc-100 font-sans select-none overflow-hidden min-h-0">
+      {/* Subtle translucent, low-contrast, non-interactive background logo */}
+      <div 
+        aria-hidden="true" 
+        className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden z-0 select-none opacity-[0.035] filter blur-[0.5px]"
+      >
+        <img 
+          src="/icon.jpeg" 
+          alt="" 
+          className="w-[360px] h-[360px] max-w-none object-contain transform scale-110" 
+        />
       </div>
 
-      {/* Centered Token Entry Box */}
-      <div className="my-auto py-6 max-w-sm w-full mx-auto">
-        <div className="bg-[#181a22] border border-[#272b36] rounded-xl shadow-2xl p-5 sm:p-6 space-y-5">
-          {/* Box Header */}
-          <div className="text-center space-y-2">
-            <div className="w-12 h-12 rounded-xl bg-blue-600/10 border border-blue-500/25 text-blue-400 flex items-center justify-center mx-auto shadow-inner">
-              <Key className="w-6 h-6" />
+      {/* Main card centered in viewport */}
+      <div className="relative z-10 my-auto py-4 max-w-sm w-full mx-auto">
+        <div className="bg-[#151821]/80 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-2xl shadow-black/60 p-6 space-y-6">
+          {/* Brand header with real logo */}
+          <div className="flex flex-col items-center text-center space-y-3">
+            <div className="w-16 h-16 rounded-2xl bg-[#1b1f2b]/90 border border-white/10 p-2 shadow-lg flex items-center justify-center overflow-hidden ring-1 ring-blue-500/20">
+              <img
+                src="/icon.jpeg"
+                alt="Lazy Terminal logo"
+                className="w-full h-full object-contain rounded-xl"
+              />
             </div>
 
-            <h2 className="text-lg font-bold text-white tracking-tight">
-              Enter Token Number
-            </h2>
-            <p className="text-xs text-zinc-400 leading-relaxed max-w-xs mx-auto">
-              Please enter the random token number given in the laptop app to open the mobile control plane.
-            </p>
-          </div>
-
-          {/* Reference Helper: Active Laptop Token */}
-          <div className="p-3 bg-[#13151b] border border-[#242733] rounded-lg space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-400 flex items-center gap-1.5 text-[11px]">
-                <Laptop className="w-3.5 h-3.5 text-zinc-400" /> Laptop App Token
-              </span>
-              <button
-                type="button"
-                onClick={handleAutoFill}
-                className="text-[11px] font-mono text-blue-400 hover:text-blue-300 cursor-pointer transition-colors flex items-center gap-1"
-                title="Autofill token from laptop app"
-              >
-                <span>Fill Token</span>
-                <ArrowRight className="w-3 h-3" />
-              </button>
-            </div>
-
-            <div className="flex items-center justify-between bg-[#181b23] px-3 py-2 rounded border border-[#2b303d]">
-              <span className="text-[11px] text-zinc-400 font-mono">Current Code:</span>
-              <span className="text-sm font-mono font-bold tracking-widest text-emerald-400">
-                {generatedConnectionKey}
-              </span>
+            <div className="space-y-1">
+              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">
+                Pair with Windows PC
+              </h1>
+              <p className="text-xs text-zinc-400 max-w-[280px] leading-relaxed">
+                Enter the 6-digit pairing code shown on your Windows host companion.
+              </p>
             </div>
           </div>
 
-          {/* Error Message Box (if validation fails) */}
-          {connectionError && (
-            <div className="p-3 bg-rose-950/40 border border-rose-800/50 rounded-lg flex items-start gap-2.5 text-xs text-rose-200 animate-in fade-in duration-150">
+          {/* Error Message Box with Retry button */}
+          {activeError && (
+            <div 
+              role="alert" 
+              className="p-3.5 bg-rose-950/40 border border-rose-800/50 rounded-xl flex items-start gap-3 text-xs text-rose-200 animate-in fade-in duration-150"
+            >
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <div className="leading-snug">{connectionError}</div>
+              <div className="flex-1 space-y-1.5">
+                <div className="leading-snug">{activeError}</div>
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  className="text-[11px] font-semibold text-rose-300 hover:text-white underline cursor-pointer inline-flex items-center gap-1 focus:outline-none focus:ring-1 focus:ring-rose-400 rounded"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Retry</span>
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Token Input Form */}
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block">
-                Random Token Number
+          {/* Simplified Single Input & Single Action Form */}
+          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            <div className="space-y-2">
+              <label 
+                htmlFor="pairing-code" 
+                className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block"
+              >
+                Pairing Code
               </label>
 
               <div className="relative">
                 <input
+                  ref={inputRef}
+                  id="pairing-code"
+                  name="pairingCode"
                   type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
                   value={tokenInput}
-                  onChange={(e) => {
-                    setTokenInput(e.target.value);
-                    if (connectionError) setConnectionError(null);
-                  }}
-                  placeholder={generatedConnectionKey || '784-291'}
-                  required
+                  onChange={handleInputChange}
+                  placeholder="e.g. 123-456"
+                  disabled={isVerifying}
+                  maxLength={7}
                   autoFocus
-                  className="w-full h-12 px-4 bg-[#121419] border border-[#2e3342] focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 rounded-lg text-base font-mono font-bold tracking-widest text-center text-white placeholder:text-zinc-600 outline-none transition-colors"
+                  className="w-full h-12 px-4 bg-[#0d0f14] border border-[#2a2f3d] focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 rounded-xl text-lg font-mono font-bold tracking-widest text-center text-white placeholder:text-zinc-600 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
-                <Key className="w-4 h-4 text-zinc-500 absolute left-3.5 top-4 pointer-events-none" />
               </div>
             </div>
 
-            {/* Submit Button */}
+            {/* Primary Action Button: Connect to PC */}
             <button
               type="submit"
               disabled={!tokenInput.trim() || isVerifying}
-              className={`w-full h-11 rounded-lg font-medium text-xs flex items-center justify-center gap-2 cursor-pointer transition-all shadow-sm ${
+              aria-label={isVerifying ? 'Connecting to PC' : 'Connect to PC'}
+              className={`w-full h-12 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-md active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${
                 tokenInput.trim() && !isVerifying
-                  ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white'
-                  : 'bg-[#1e222c] text-zinc-500 border border-[#2b303d] cursor-not-allowed'
+                  ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white cursor-pointer shadow-blue-600/20'
+                  : 'bg-[#1a1d26] text-zinc-500 border border-[#282d3b] cursor-not-allowed'
               }`}
             >
               {isVerifying ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-white" />
-                  <span>Verifying Token...</span>
+                  <span>Connecting to PC...</span>
                 </>
               ) : (
                 <>
-                  <Lock className="w-4 h-4" />
-                  <span>Validate & Open Mobile UI</span>
+                  <span>Connect to PC</span>
+                  <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>
           </form>
 
-          {/* Quick Helper Button: Switch to Laptop App */}
-          <div className="pt-1 text-center">
-            <button
-              type="button"
-              onClick={() => setActiveFrontend('laptop')}
-              className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors inline-flex items-center gap-1.5 cursor-pointer py-1"
-            >
-              <Laptop className="w-3.5 h-3.5" />
-              <span>Need to check laptop app? Switch View</span>
-            </button>
+          {/* Connection status indicator */}
+          <div className="flex items-center justify-center gap-2 text-[11px] text-zinc-500">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500/80 animate-pulse" />
+            <span>Ready for local pairing</span>
           </div>
         </div>
       </div>
 
-      {/* Footer Security Note */}
-      <div className="text-center py-2 text-[11px] text-zinc-500 font-mono flex items-center justify-center gap-1.5">
+      {/* Refined Security Badge Footer */}
+      <footer className="relative z-10 text-center py-2 text-[11px] text-zinc-500 font-mono flex items-center justify-center gap-1.5 shrink-0">
         <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
         <span>TLS 1.3 · Mutual Ed25519 Token Authentication</span>
-      </div>
+      </footer>
     </div>
   );
 }

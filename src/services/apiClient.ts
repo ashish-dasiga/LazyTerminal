@@ -116,7 +116,9 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
         let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
         try {
           const parsed = JSON.parse(errorBody);
-          if (parsed.message) errorMessage = parsed.message;
+          if (parsed.errorMessage) errorMessage = parsed.errorMessage;
+          else if (parsed.message) errorMessage = parsed.message;
+          else if (parsed.error?.message) errorMessage = parsed.error.message;
         } catch {
           if (errorBody) errorMessage = errorBody;
         }

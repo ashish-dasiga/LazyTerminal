@@ -15,6 +15,8 @@
     "test:shreya": "node --import tsx --test tests/cliDetector.test.ts tests/runDebug.test.ts tests/preview.test.ts",
     "test:deeksha": "node --import tsx --test src/tests/*.test.ts",
     "test": "tsx tests/fsGit.test.ts && tsx tests/hostApi.test.ts && node --import tsx --test src/tests/*.test.ts",
+    "test:pairing": "node --import tsx --test tests/realPairingIntegration.test.ts",
+    "test:e2e:pairing": "node ./node_modules/@playwright/test/cli.js test e2e/mobile-pairing.spec.ts",
     "test:e2e": "tsx tests/e2ePlaywright.test.ts",
     "test:portal": "node scripts/verify-simplified-portal.cjs",
     "test:apps": "tsx tests/appsVerification.test.ts",

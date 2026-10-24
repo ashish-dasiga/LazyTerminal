@@ -2,18 +2,34 @@ import { test, expect } from '@playwright/test';
 
 // Helper to complete the connection/pairing flow
 async function pairAndConnect(page: any) {
+  // Mock successful pairing call
+  await page.route('**/api/v1/tunnel/connect', async (route: any) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        sessionToken: 'e2e_session_token',
+        device: {
+          deviceName: 'DESKTOP-WIN11-PRO',
+          isOnline: true,
+        },
+      }),
+    });
+  });
+
   await page.goto('/?view=mobile');
 
-  // Wait for the connection screen
-  await expect(page.locator('text=Enter Token Number')).toBeVisible({ timeout: 10000 });
+  // Wait for the redesigned connection screen
+  await expect(page.locator('h1:has-text("Pair with Windows PC")')).toBeVisible({ timeout: 10000 });
 
-  // Use the autofill button
-  const fillTokenBtn = page.locator('button:has-text("Fill Token")');
-  await fillTokenBtn.click();
+  // Fill code in the single input
+  const input = page.locator('#pairing-code');
+  await input.fill('123-456');
 
-  // Click Validate & Open Mobile UI
-  const validateBtn = page.locator('button:has-text("Validate & Open Mobile UI")');
-  await validateBtn.click();
+  // Click the single primary action button: Connect to PC
+  const connectBtn = page.getByRole('button', { name: 'Connect to PC' });
+  await connectBtn.click();
 
   // Verify transition to connected Terminal screen
   await expect(page.locator('text=DESKTOP-WIN11-PRO').first()).toBeVisible({ timeout: 10000 });
@@ -30,19 +46,32 @@ async function pairAndConnect(page: any) {
 test.describe('Lazy Terminal — E2E Suite', () => {
 
   test('1. Full Pairing Flow: Enter token and connect to Terminal workspace', async ({ page }) => {
+    await page.route('**/api/v1/tunnel/connect', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          sessionToken: 'e2e_session_token',
+          device: {
+            deviceName: 'DESKTOP-WIN11-PRO',
+            isOnline: true,
+          },
+        }),
+      });
+    });
+
     await page.goto('/?view=mobile');
 
-    // Top application bar
-    await expect(page.locator('header').locator('text=Remote Development System')).toBeVisible();
-
     // Box header
-    await expect(page.locator('text=Enter Token Number')).toBeVisible();
+    await expect(page.locator('h1')).toHaveText('Pair with Windows PC');
 
-    // Fill Token
-    await page.locator('button:has-text("Fill Token")').click();
+    // Single pairing code input
+    const input = page.locator('#pairing-code');
+    await input.fill('123-456');
 
-    // Click submit
-    await page.locator('button:has-text("Validate & Open Mobile UI")').click();
+    // Single primary action: Connect to PC
+    await page.getByRole('button', { name: 'Connect to PC' }).click();
 
     // Verify connected terminal workspace
     await expect(page.locator('text=DESKTOP-WIN11-PRO').first()).toBeVisible({ timeout: 10000 });
@@ -141,20 +170,15 @@ test.describe('Lazy Terminal — E2E Suite', () => {
   });
 
   test('6. Dual Frontend Architecture: Switch between Mobile and Laptop Workstation', async ({ page }) => {
-    await page.goto('/?view=mobile');
-
-    // Switch to Laptop view using header button
-    const laptopTab = page.locator('header button:has-text("Laptop App")');
-    await laptopTab.click();
-
-    // Laptop view elements
+    // Laptop view route
+    await page.goto('/?view=laptop');
     await expect(page.locator('text=Windows 11').first()).toBeVisible();
     await expect(page.locator('text=DESKTOP-WIN11-PRO').first()).toBeVisible();
 
-    // Switch back to Mobile view
-    const mobileTab = page.locator('header button:has-text("Mobile App")');
-    await mobileTab.click();
-    await expect(page.locator('text=Enter Token Number')).toBeVisible();
+    // Mobile view route
+    await page.goto('/?view=mobile');
+    await expect(page.locator('h1')).toHaveText('Pair with Windows PC');
+    await expect(page.locator('#pairing-code')).toBeVisible();
   });
 
   test('7. Offline Queue Persistence: Survives reload in IndexedDB', async ({ page }) => {
@@ -173,9 +197,9 @@ test.describe('Lazy Terminal — E2E Suite', () => {
 
     // Reload the page and pair again — queued intent must survive in IndexedDB
     await page.reload();
-    await expect(page.locator('text=Enter Token Number')).toBeVisible({ timeout: 10000 });
-    await page.locator('button:has-text("Fill Token")').click();
-    await page.locator('button:has-text("Validate & Open Mobile UI")').click();
+    await expect(page.locator('h1:has-text("Pair with Windows PC")')).toBeVisible({ timeout: 10000 });
+    await page.locator('#pairing-code').fill('123-456');
+    await page.getByRole('button', { name: 'Connect to PC' }).click();
 
     // Reconciliation modal should appear and list our persisted command
     await expect(page.locator('text=PC Reconnected: State Synchronization')).toBeVisible({ timeout: 10000 });

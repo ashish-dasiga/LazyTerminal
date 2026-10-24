@@ -542,7 +542,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_USER);
   const [connectionStep, setConnectionStep] = useState<MobileConnectionStep>('enter_key');
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [generatedConnectionKey, setGeneratedConnectionKey] = useState<string>('784-291');
+  const [generatedConnectionKey, setGeneratedConnectionKey] = useState<string>('');
 
   // Mobile drawer & navigation
   const [mobileNav, setMobileNav] = useState<MobileNavSection>('terminal');
@@ -559,7 +559,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     pingMs: 18,
     pairedAt: 'October 12, 2026',
     ed25519Fingerprint: 'SHA256:4b7f8c2e91a0...93d8',
-    pairingToken: '784-291',
+    pairingToken: '',
     sqliteDbSizeKb: 142,
     backendServerStatus: 'running',
     tunnelStatus: 'idle',
@@ -698,58 +698,37 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     setConnectionStep('connecting');
 
     const adapter = getBackendAdapter();
-    if (!adapter.isMock) {
-      try {
-        const res = await adapter.connection.connectToHost({ pairingKey: key });
-        if (res.success) {
-          setDevice((prev) => ({
-            ...prev,
-            ...res.device,
-            pairingToken: generatedConnectionKey,
-            isOnline: true,
-            backendServerStatus: 'running',
-            tunnelStatus: 'active',
-          }));
-          setConnectionStep('connected');
-          setMobileNav('terminal');
-          return true;
-        }
-        setConnectionStep('enter_key');
-        setConnectionError(
-          res.errorMessage ||
-            `Incorrect token number "${key}". Please check the current 6-digit key displayed on your Windows PC.`
-        );
-        return false;
-      } catch (err) {
-        setConnectionStep('enter_key');
-        setConnectionError(
-          err instanceof Error
-            ? err.message
-            : 'Windows PC companion is unreachable. Start the host companion and try again.'
-        );
-        return false;
+    try {
+      const res = await adapter.connection.connectToHost({ pairingKey: key });
+      if (res.success) {
+        setDevice((prev) => ({
+          ...prev,
+          ...res.device,
+          pairingToken: key,
+          isOnline: true,
+          backendServerStatus: 'running',
+          tunnelStatus: 'active',
+        }));
+        setConnectionStep('connected');
+        setMobileNav('terminal');
+        return true;
       }
-    }
-
-    await new Promise((r) => setTimeout(r, 600));
-
-    // Normalize keys: strip dashes and spaces, lowercase
-    const normalizedInput = key.replace(/[\s-]/g, '').toLowerCase();
-    const normalizedTarget = generatedConnectionKey.replace(/[\s-]/g, '').toLowerCase();
-
-    // Allow exact match (ignoring dashes/spaces)
-    if (normalizedInput === normalizedTarget) {
-      setConnectionStep('connected');
-      setMobileNav('terminal');
-      return true;
-    } else {
       setConnectionStep('enter_key');
       setConnectionError(
-        `Incorrect token number "${key}". Please enter the token shown in the laptop app (${generatedConnectionKey}).`
+        res.errorMessage ||
+          `Incorrect pairing code "${key}". Please check the current 6-digit key displayed on your Windows PC.`
+      );
+      return false;
+    } catch (err) {
+      setConnectionStep('enter_key');
+      setConnectionError(
+        err instanceof Error
+          ? err.message
+          : 'Windows PC companion is unreachable. Start the host companion and try again.'
       );
       return false;
     }
-  }, [generatedConnectionKey]);
+  }, []);
 
   // Disconnect mobile
   const disconnectMobile = useCallback(() => {
