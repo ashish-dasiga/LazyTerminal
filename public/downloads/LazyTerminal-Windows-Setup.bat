@@ -8,22 +8,28 @@ echo                ( o.o )   Lazy Terminal
 echo                 ^> ^ ^<    Windows PC Companion v1.0.0
 echo ======================================================================
 echo.
-echo [1/3] Checking Node.js environment...
-where node >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [ERROR] Node.js is required to run the PC Companion.
-    echo Please install Node.js 18+ from https://nodejs.org/
-    pause
-    exit /b 1
+echo Launching Lazy Terminal Windows Companion GUI...
+
+cd /d "%~dp0"
+
+if exist "LazyTerminal-Windows-Setup.exe" (
+    start "" "LazyTerminal-Windows-Setup.exe"
+    exit /b 0
 )
 
-echo [2/3] Starting Lazy Terminal Windows Companion daemon...
-cd /d "%~dp0\..\.."
-start http://localhost:3000
+where python >nul 2>nul
+if %errorlevel% equ 0 (
+    start "" python "%~dp0lazy_terminal_companion.py"
+    exit /b 0
+)
 
-echo [3/3] Launching Host Server on port 3000...
-echo.
-echo Press Ctrl+C in this window to stop the host server.
-echo.
-node server.js 2>nul || npx tsx server.ts
+where py >nul 2>nul
+if %errorlevel% equ 0 (
+    start "" py "%~dp0lazy_terminal_companion.py"
+    exit /b 0
+)
+
+echo [ERROR] Neither standalone executable nor Python 3 found.
+echo Please install Python 3.10+ from https://www.python.org/
 pause
+exit /b 1

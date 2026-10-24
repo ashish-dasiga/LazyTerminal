@@ -147,6 +147,13 @@ class RealConnectionService implements IConnectionService {
     });
   }
 
+  async fetchActiveHostKey(): Promise<{ pairingKey: string; expiresInSeconds: number }> {
+    return apiRequest<{ pairingKey: string; expiresInSeconds: number }>('/api/v1/pairing/key', {
+      method: 'GET',
+      skipAuth: true,
+    });
+  }
+
   async validatePairingKey(req: ValidateKeyRequest): Promise<ValidateKeyResponse> {
     return apiRequest<ValidateKeyResponse>('/api/v1/pairing/validate', {
       method: 'POST',

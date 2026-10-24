@@ -172,6 +172,13 @@ class MockConnectionService implements IConnectionService {
     };
   }
 
+  async fetchActiveHostKey(): Promise<{ pairingKey: string; expiresInSeconds: number }> {
+    return {
+      pairingKey: this.activeKey,
+      expiresInSeconds: 300,
+    };
+  }
+
   async validatePairingKey(req: ValidateKeyRequest): Promise<ValidateKeyResponse> {
     await new Promise((r) => setTimeout(r, 450));
     const cleanInput = req.pairingKey.replace(/\D/g, '');

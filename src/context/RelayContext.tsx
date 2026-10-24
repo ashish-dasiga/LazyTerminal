@@ -562,7 +562,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     pairingToken: '784-291',
     sqliteDbSizeKb: 142,
     backendServerStatus: 'running',
-    tunnelStatus: 'active',
+    tunnelStatus: 'idle',
     totalIntentsProcessed: 28,
     cpuUsagePercent: 4.2,
     memoryUsageMb: 184,
@@ -620,10 +620,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     const syncHostKey = async () => {
       const adapter = getBackendAdapter();
-      if (adapter.connection instanceof WindowsHostConnectionClient) {
+      const conn = adapter.connection as any;
+      if (conn && typeof conn.fetchActiveHostKey === 'function') {
         try {
-          const keyEnvelope = await adapter.connection.fetchActiveHostKey();
-          if (!cancelled && keyEnvelope.pairingKey) {
+          const keyEnvelope = await conn.fetchActiveHostKey();
+          if (!cancelled && keyEnvelope?.pairingKey) {
             setGeneratedConnectionKey(keyEnvelope.pairingKey);
             setDevice((prev) => ({
               ...prev,
@@ -653,14 +654,17 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   // Regenerate random connection key for Windows PC
   const regenerateConnectionKey = useCallback(() => {
     const adapter = getBackendAdapter();
-    if (!adapter.isMock) {
-      adapter.connection
+    const conn = adapter.connection as any;
+    if (conn && typeof conn.generateHostKey === 'function') {
+      conn
         .generateHostKey()
-        .then((res) => {
-          setGeneratedConnectionKey(res.pairingKey);
-          setDevice((prev) => ({ ...prev, pairingToken: res.pairingKey }));
+        .then((res: any) => {
+          if (res?.pairingKey) {
+            setGeneratedConnectionKey(res.pairingKey);
+            setDevice((prev) => ({ ...prev, pairingToken: res.pairingKey }));
+          }
         })
-        .catch((err) => {
+        .catch((err: any) => {
           setConnectionError(
             err instanceof Error ? err.message : 'Failed to regenerate key on Windows host.'
           );
@@ -755,6 +759,10 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     }
     setConnectionStep('enter_key');
     setConnectionError(null);
+    setDevice((prev) => ({
+      ...prev,
+      tunnelStatus: 'idle',
+    }));
   }, []);
 
   // Toggle PC Online / Offline

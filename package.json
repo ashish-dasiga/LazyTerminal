@@ -18,6 +18,8 @@
     "test:e2e": "tsx tests/e2ePlaywright.test.ts",
     "test:portal": "node scripts/verify-simplified-portal.cjs",
     "test:apps": "tsx tests/appsVerification.test.ts",
+    "test:sync": "tsx tests/laptopSyncFlowPlaywright.test.ts",
+    "companion": "python lazy_terminal_companion.py",
     "build:apk": "node scripts/build_android_apk.cjs"
   },
   "dependencies": {

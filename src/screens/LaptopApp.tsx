@@ -80,17 +80,23 @@ export function LaptopApp() {
     regenerateConnectionKey,
     reconcileAllIntents,
     setActiveFrontend,
-    intentQueue
+    intentQueue,
+    connectionStep,
+    connectWithKey,
+    disconnectMobile
   } = useRelay();
 
-  // 1) Token Window State
+  // 1) Connection state
+  const isConnected = connectionStep === 'connected';
+
+  // 2) Token Window State
   const [tokenCopied, setTokenCopied] = useState(false);
   const tokenNumber = generatedConnectionKey;
 
-  // 2) Server status
+  // 3) Server status
   const isServerRunning = device.backendServerStatus === 'running';
 
-  // 3) Sync Request & Dropdown State
+  // 4) Sync Request & Dropdown State
   const [syncRequests, setSyncRequests] = useState<SyncRequestRecord[]>(INITIAL_SYNC_REQUESTS);
   const [selectedSyncId, setSelectedSyncId] = useState<string>(INITIAL_SYNC_REQUESTS[0].id);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -189,14 +195,38 @@ export function LaptopApp() {
           </div>
         )}
 
-        {/* 1) Token Window (Small Window with Random Token Number) */}
-        <div className="bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col overflow-hidden">
+        {/* Connected Device Banner (Visible once connected) */}
+        {isConnected && (
+          <div className="py-2 px-3.5 bg-emerald-950/40 border border-emerald-800/60 rounded-lg flex items-center justify-between text-xs text-emerald-200 shrink-0 shadow-sm animate-in fade-in duration-200">
+            <div className="flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-emerald-300">Device Connected:</span>
+                <span className="text-zinc-300 font-mono">Android Mobile Client (Ed25519 Tunnel Active)</span>
+              </div>
+            </div>
+            <button
+              onClick={disconnectMobile}
+              className="px-2.5 py-1 bg-[#1a1d24] hover:bg-[#252833] border border-[#2e3442] rounded text-[11px] text-zinc-300 hover:text-white cursor-pointer transition-colors"
+              title="Disconnect active mobile session"
+            >
+              Disconnect
+            </button>
+          </div>
+        )}
+
+        {/* 1) Token Window (When waiting for connection, shown as the primary focus) */}
+        <div className={`bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col overflow-hidden transition-all ${
+          !isConnected ? 'py-4 px-2 sm:px-4' : ''
+        }`}>
           <div className="h-7.5 bg-[#15181f] border-b border-[#242833] px-3 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
               <Key className="w-3.5 h-3.5 text-amber-400" />
               <span className="text-xs font-semibold text-zinc-200">Token Window</span>
             </div>
-            <span className="text-[10px] text-zinc-500 font-mono">Backend Bound</span>
+            <span className="text-[10px] text-zinc-500 font-mono">
+              {isConnected ? 'Paired Session Active' : 'Backend Bound'}
+            </span>
           </div>
 
           <div className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -208,11 +238,13 @@ export function LaptopApp() {
                 {tokenNumber}
               </div>
               <p className="text-[11px] text-zinc-500">
-                Dynamic pairing token (will later be updated according to the backend).
+                {isConnected
+                  ? 'Active session paired with this cryptographic token.'
+                  : 'Dynamic pairing token. Enter this 6-digit code on mobile to connect.'}
               </p>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
                 onClick={handleCopyToken}
                 className="px-3 py-1.5 bg-[#1e222b] hover:bg-[#292f3b] text-zinc-200 hover:text-white rounded-md border border-[#2e3442] cursor-pointer transition-colors flex items-center gap-1.5 text-xs font-medium"
@@ -238,110 +270,147 @@ export function LaptopApp() {
               >
                 <RefreshCw className="w-3.5 h-3.5 text-zinc-400 hover:text-zinc-200" />
               </button>
-            </div>
-          </div>
-        </div>
 
-        {/* 2) Server Control & 3) Sync Manager (Side by Side Grid) */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-          {/* 2) Server Control Window */}
-          <div className="md:col-span-5 bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col justify-between p-3.5 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
-                <Server className="w-3.5 h-3.5 text-zinc-400" /> Server Control
-              </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded border flex items-center gap-1.5 bg-zinc-800/80 text-zinc-400 border-zinc-700/60">
-                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
-                {isServerRunning ? 'RUNNING' : 'STOPPED'}
-              </span>
-            </div>
-
-            <div className="space-y-1 text-xs font-mono text-zinc-400 bg-[#121418] p-2.5 rounded border border-[#222630]">
-              <div className="flex justify-between items-center">
-                <span className="text-zinc-500">Local Port:</span>
-                <span className="text-zinc-200 font-semibold">9871 (TCP TLS)</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-zinc-500">Host IP:</span>
-                <span className="text-zinc-300">{device.ip}</span>
-              </div>
-            </div>
-
-            {/* Start / Stop Server Button */}
-            <button
-              onClick={toggleBackendServer}
-              className={`w-full py-2.5 px-3 rounded-md text-xs font-medium cursor-pointer transition-colors flex items-center justify-center gap-2 text-white shadow-sm ${
-                isServerRunning
-                  ? 'bg-rose-600 hover:bg-rose-500 active:bg-rose-700'
-                  : 'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700'
-              }`}
-            >
-              {isServerRunning ? (
-                <>
-                  <Square className="w-3.5 h-3.5 fill-white text-white" />
-                  <span>Stop Server</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5 fill-white text-white" />
-                  <span>Start Server</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          {/* 3) Sync Manager Window */}
-          <div className="md:col-span-7 bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col justify-between p-3.5 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
-                <SyncIcon className="w-3.5 h-3.5 text-blue-400" /> Sync Manager
-              </span>
-              <span className="text-[10px] text-zinc-500 font-mono">
-                {syncRequests.length} sync requests recorded
-              </span>
-            </div>
-
-            {/* Sync Request Button + Previous Syncs Dropdown */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              <button
-                onClick={handleSyncRequest}
-                disabled={isSyncing}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 text-white font-medium rounded-md text-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5 shadow-sm shrink-0"
-              >
-                <SyncIcon className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                <span>{isSyncing ? 'Syncing...' : 'Sync Request'}</span>
-              </button>
-
-              <div className="flex-1 relative min-w-0">
-                <select
-                  value={selectedSyncId}
-                  onChange={(e) => setSelectedSyncId(e.target.value)}
-                  className="w-full h-8 bg-[#121419] border border-[#2a2f3c] hover:border-[#384052] rounded-md px-2.5 pr-8 text-xs text-zinc-200 font-mono appearance-none cursor-pointer focus:outline-none focus:border-blue-500 transition-colors truncate"
+              {!isConnected && (
+                <button
+                  onClick={() => connectWithKey(generatedConnectionKey)}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-md cursor-pointer transition-colors flex items-center gap-1.5 text-xs font-medium shadow-sm"
+                  title="Simulate mobile pairing for testing"
                 >
-                  {syncRequests.map((req) => (
-                    <option key={req.id} value={req.id} className="bg-[#14161c] text-zinc-200">
-                      {req.id} · {req.timeAgo}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2.5 top-2.5" />
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>Simulate Mobile Connect</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Waiting for Mobile Connection Guide (Shown only when NOT connected) */}
+          {!isConnected && (
+            <div className="mx-3.5 mb-3.5 p-3 bg-[#121418] border border-[#222630] rounded-md flex items-center justify-between text-xs text-zinc-400">
+              <div className="flex items-center gap-2.5">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+                <span>Waiting for Android client to connect with this token on the local network...</span>
               </div>
+              <span className="text-[11px] text-zinc-500 font-mono hidden sm:inline">
+                Port: 9871 / 3000
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* 2) Server Control & 3) Sync Manager (SHOWN ONLY ONCE CONNECTED) */}
+        {isConnected ? (
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 animate-in fade-in duration-300">
+            {/* 2) Server Control Window */}
+            <div className="md:col-span-5 bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col justify-between p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-zinc-400" /> Server Control
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded border flex items-center gap-1.5 bg-zinc-800/80 text-zinc-400 border-zinc-700/60">
+                  <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />
+                  {isServerRunning ? 'RUNNING' : 'STOPPED'}
+                </span>
+              </div>
+
+              <div className="space-y-1 text-xs font-mono text-zinc-400 bg-[#121418] p-2.5 rounded border border-[#222630]">
+                <div className="flex justify-between items-center">
+                  <span className="text-zinc-500">Local Port:</span>
+                  <span className="text-zinc-200 font-semibold">9871 (TCP TLS)</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-zinc-500">Host IP:</span>
+                  <span className="text-zinc-300">{device.ip}</span>
+                </div>
+              </div>
+
+              {/* Start / Stop Server Button */}
+              <button
+                onClick={toggleBackendServer}
+                className={`w-full py-2.5 px-3 rounded-md text-xs font-medium cursor-pointer transition-colors flex items-center justify-center gap-2 text-white shadow-sm ${
+                  isServerRunning
+                    ? 'bg-rose-600 hover:bg-rose-500 active:bg-rose-700'
+                    : 'bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700'
+                }`}
+              >
+                {isServerRunning ? (
+                  <>
+                    <Square className="w-3.5 h-3.5 fill-white text-white" />
+                    <span>Stop Server</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-white text-white" />
+                    <span>Start Server</span>
+                  </>
+                )}
+              </button>
             </div>
 
-            {/* Selected Sync Request Details */}
-            {selectedSync && (
-              <div className="p-2.5 bg-[#121418] border border-[#222630] rounded-md space-y-1">
-                <div className="flex items-center justify-between text-[11px] font-mono">
-                  <span className="text-zinc-200 font-semibold">{selectedSync.id}</span>
-                  <span className="text-zinc-500">{selectedSync.timestamp}</span>
-                </div>
-                <p className="text-[11px] text-zinc-400 truncate">
-                  {selectedSync.summary}
-                </p>
+            {/* 3) Sync Manager Window */}
+            <div className="md:col-span-7 bg-[#1a1d24] border border-[#282d38] rounded-lg shadow-sm flex flex-col justify-between p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <SyncIcon className="w-3.5 h-3.5 text-blue-400" /> Sync Manager
+                </span>
+                <span className="text-[10px] text-zinc-500 font-mono">
+                  {syncRequests.length} sync requests recorded
+                </span>
               </div>
-            )}
+
+              {/* Sync Request Button + Previous Syncs Dropdown */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <button
+                  onClick={handleSyncRequest}
+                  disabled={isSyncing}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 text-white font-medium rounded-md text-xs cursor-pointer transition-colors flex items-center justify-center gap-1.5 shadow-sm shrink-0"
+                >
+                  <SyncIcon className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Syncing...' : 'Sync Request'}</span>
+                </button>
+
+                <div className="flex-1 relative min-w-0">
+                  <select
+                    value={selectedSyncId}
+                    onChange={(e) => setSelectedSyncId(e.target.value)}
+                    className="w-full h-8 bg-[#121419] border border-[#2a2f3c] hover:border-[#384052] rounded-md px-2.5 pr-8 text-xs text-zinc-200 font-mono appearance-none cursor-pointer focus:outline-none focus:border-blue-500 transition-colors truncate"
+                  >
+                    {syncRequests.map((req) => (
+                      <option key={req.id} value={req.id} className="bg-[#14161c] text-zinc-200">
+                        {req.id} · {req.timeAgo}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-3.5 h-3.5 text-zinc-400 pointer-events-none absolute right-2.5 top-2.5" />
+                </div>
+              </div>
+
+              {/* Selected Sync Request Details */}
+              {selectedSync && (
+                <div className="p-2.5 bg-[#121418] border border-[#222630] rounded-md space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="text-zinc-200 font-semibold">{selectedSync.id}</span>
+                    <span className="text-zinc-500">{selectedSync.timestamp}</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 truncate">
+                    {selectedSync.summary}
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        ) : (
+          /* Placeholder view before connection */
+          <div className="flex-1 flex flex-col items-center justify-center text-center p-6 border border-dashed border-[#282d38] rounded-lg bg-[#16181f]/40 my-auto">
+            <Radio className="w-8 h-8 text-zinc-600 mb-2 animate-pulse" />
+            <h3 className="text-sm font-semibold text-zinc-300 mb-1">
+              Host Standby — Ready to Pair
+            </h3>
+            <p className="text-xs text-zinc-500 max-w-sm">
+              Connect your mobile device with the random token number above. Once paired, live synchronization and host management will unlock.
+            </p>
+          </div>
+        )}
 
         {/* Host Status & Telemetry Footer Strip */}
         <div className="p-2.5 bg-[#16181f] border border-[#242833] rounded-lg flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-zinc-400 shrink-0">

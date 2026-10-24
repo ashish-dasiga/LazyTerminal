@@ -119,6 +119,12 @@ export interface IConnectionService {
   generateHostKey(): Promise<GenerateKeyResponse>;
 
   /**
+   * Fetches the active 6-digit cryptographic pairing key from the Windows PC companion.
+   * @endpoint GET /api/v1/pairing/key
+   */
+  fetchActiveHostKey?(): Promise<{ pairingKey: string; expiresInSeconds: number }>;
+
+  /**
    * Validates the 6-digit key entered on the mobile phone before opening tunnel.
    * @endpoint POST /api/v1/pairing/validate
    * @transport TLS Relay Server or Local LAN Handshake

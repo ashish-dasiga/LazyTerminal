@@ -11,3 +11,5 @@ playwright-report/
 build_android/
 *.png
 /context/
+*.spec
+__pycache__/
