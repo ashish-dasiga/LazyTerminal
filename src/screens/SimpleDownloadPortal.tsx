@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Smartphone, Laptop, CheckCircle2, ShieldCheck, ArrowDownToLine } from 'lucide-react';
+import { useRelay } from '../context/RelayContext';
 
 export function SimpleDownloadPortal() {
+  const { setActiveFrontend } = useRelay();
   const [downloadingApk, setDownloadingApk] = useState(false);
   const [downloadingExe, setDownloadingExe] = useState(false);
   const [apkUrl, setApkUrl] = useState('/downloads/LazyTerminal.apk');
@@ -125,6 +127,17 @@ export function SimpleDownloadPortal() {
               )}
             </div>
           </a>
+        </div>
+
+        {/* Option to launch directly in browser */}
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setActiveFrontend('mobile')}
+            className="text-xs text-zinc-400 hover:text-sky-400 underline underline-offset-4 transition-colors cursor-pointer"
+          >
+            Or open Mobile Web App directly in browser &rarr;
+          </button>
         </div>
 
         {/* Minimalist Trust & Security Footer */}

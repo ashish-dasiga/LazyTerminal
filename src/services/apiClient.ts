@@ -116,9 +116,15 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
         let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
         try {
           const parsed = JSON.parse(errorBody);
-          if (parsed.message) errorMessage = parsed.message;
+          if (parsed.errorMessage) errorMessage = parsed.errorMessage;
+          else if (parsed.message) errorMessage = parsed.message;
+          else if (parsed.error) errorMessage = parsed.error;
         } catch {
-          if (errorBody) errorMessage = errorBody;
+          if (errorBody.toLowerCase().includes('<!doctype') || errorBody.toLowerCase().includes('<html')) {
+            errorMessage = `Unable to connect to Windows PC Companion at ${config.hostBaseUrl}. Ensure Lazy Terminal Companion is running on your PC and both devices are on the same Wi-Fi.`;
+          } else if (errorBody.trim().length > 0 && errorBody.length < 200) {
+            errorMessage = errorBody.trim();
+          }
         }
         throw new ApiError(errorMessage, response.status, `HTTP_${response.status}`);
       }

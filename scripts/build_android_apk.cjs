@@ -147,7 +147,7 @@ public class MainActivity extends Activity {
         });
 
         setContentView(webView);
-        webView.loadUrl("file:///android_asset/www/index.html");
+        webView.loadUrl("file:///android_asset/www/index.html?view=mobile&source=apk");
     }
 
     @Override

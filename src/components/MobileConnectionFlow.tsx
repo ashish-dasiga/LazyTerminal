@@ -5,8 +5,11 @@ import {
   Loader2, 
   ShieldCheck,
   CheckCircle2,
-  RefreshCw
+  RefreshCw,
+  Settings,
+  Wifi
 } from 'lucide-react';
+import { getAppConfig, setHostUrl } from '../services/config';
 
 export function MobileConnectionFlow() {
   const { 
@@ -18,6 +21,23 @@ export function MobileConnectionFlow() {
   const [tokenInput, setTokenInput] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Host configuration state
+  const [hostUrl, setHostUrlState] = useState(() => getAppConfig().hostBaseUrl);
+  const [isEditingHost, setIsEditingHost] = useState(false);
+  const [customHostInput, setCustomHostInput] = useState(hostUrl);
+
+  const handleSaveHost = () => {
+    let clean = customHostInput.trim();
+    if (!clean) return;
+    if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+      clean = `http://${clean}`;
+    }
+    setHostUrl(clean);
+    setHostUrlState(clean);
+    setIsEditingHost(false);
+    if (connectionError) setConnectionError(null);
+  };
 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -100,19 +120,21 @@ export function MobileConnectionFlow() {
           {activeError && (
             <div 
               role="alert"
-              className="p-3.5 bg-rose-950/45 border border-rose-800/60 rounded-xl flex items-start gap-2.5 text-xs text-rose-200 shadow-sm animate-in fade-in duration-150"
+              className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/25 text-red-300 text-xs flex items-start gap-2.5 animate-fadeIn"
             >
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <div className="leading-snug flex-1">
-                <span className="font-medium">{activeError}</span>
-                {activeError.toLowerCase().includes('unreachable') && (
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+              <div className="leading-relaxed break-words flex-1">
+                {activeError}
+                {activeError.toLowerCase().includes('unable to connect') && !isEditingHost && (
                   <button
                     type="button"
-                    onClick={() => handleSubmit()}
-                    className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-rose-300 hover:text-white underline cursor-pointer"
+                    onClick={() => {
+                      setCustomHostInput(hostUrl);
+                      setIsEditingHost(true);
+                    }}
+                    className="block mt-1.5 text-sky-400 hover:text-sky-300 underline font-semibold cursor-pointer"
                   >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Retry connection</span>
+                    Edit Host PC IP Address &rarr;
                   </button>
                 )}
               </div>
@@ -171,6 +193,50 @@ export function MobileConnectionFlow() {
                 <span>Connect to PC</span>
               )}
             </button>
+
+            {/* Host PC IP Indicator & Quick Edit */}
+            <div className="pt-2 text-center">
+              {!isEditingHost ? (
+                <div className="flex items-center justify-center gap-1.5 text-[11px] text-zinc-400">
+                  <span className="font-mono truncate max-w-[210px]">Host: {hostUrl}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomHostInput(hostUrl);
+                      setIsEditingHost(true);
+                    }}
+                    className="text-sky-400 hover:text-sky-300 underline underline-offset-2 ml-1 cursor-pointer font-medium"
+                  >
+                    Change IP
+                  </button>
+                </div>
+              ) : (
+                <div className="p-3 bg-[#0c0f17] rounded-xl border border-zinc-700/60 text-left space-y-2 mt-2">
+                  <label className="text-[10px] uppercase font-bold tracking-wider text-zinc-300 block">
+                    Host PC LAN Address (from PC screen)
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={customHostInput}
+                      onChange={(e) => setCustomHostInput(e.target.value)}
+                      placeholder="http://192.168.1.4:3000"
+                      className="flex-1 h-9 px-2.5 bg-[#141824] border border-zinc-700 focus:border-blue-500 rounded-lg text-xs font-mono text-white placeholder:text-zinc-600 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveHost}
+                      className="px-3 h-9 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                    >
+                      Save
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-zinc-500 leading-tight">
+                    Enter the Host LAN URL shown on your Windows Companion window (e.g. http://192.168.1.4:3000).
+                  </p>
+                </div>
+              )}
+            </div>
           </form>
 
         </div>

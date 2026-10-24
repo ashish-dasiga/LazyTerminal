@@ -521,7 +521,7 @@ const RelayContext = createContext<RelayContextType | null>(null);
 function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('view') === 'mobile' || params.get('source') === 'pwa') {
+    if (params.get('view') === 'mobile' || params.get('source') === 'pwa' || params.get('source') === 'apk') {
       return 'mobile';
     }
     if (params.get('view') === 'laptop') {
@@ -530,7 +530,8 @@ function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
     if (params.get('view') === 'install' || params.get('view') === 'portal') {
       return 'portal';
     }
-    if (window.innerWidth <= 640) {
+    // Inside native Android APK WebView (file:///android_asset/...)
+    if (window.location.protocol === 'file:') {
       return 'mobile';
     }
   }
@@ -722,11 +723,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         return false;
       } catch (err) {
         setConnectionStep('enter_key');
-        setConnectionError(
-          err instanceof Error
-            ? err.message
-            : 'Windows PC companion is unreachable. Start the host companion and try again.'
-        );
+        const rawMsg = err instanceof Error ? err.message : String(err);
+        const cleanMsg =
+          rawMsg.toLowerCase().includes('<!doctype') ||
+          rawMsg.toLowerCase().includes('<html') ||
+          rawMsg.includes('404')
+            ? 'Unable to connect to Windows PC companion. Ensure Lazy Terminal companion is running on your PC and both devices are on the same Wi-Fi.'
+            : rawMsg;
+        setConnectionError(cleanMsg);
         return false;
       }
     }

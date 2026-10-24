@@ -38,10 +38,22 @@ function resolveHostUrl(): string {
   if (typeof window !== 'undefined') {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_HOST_KEY);
-      if (stored) return stored;
+      if (stored && stored.trim().length > 0) return stored.trim();
     } catch {}
-    if (typeof window !== "undefined" && window.location && window.location.origin && window.location.origin.startsWith("http")) {
-      return window.location.origin;
+
+    // Only use window.location.origin if it is a local host or private LAN IP
+    // Never treat GitHub Pages or public static hosting as the PC companion host!
+    if (window.location && window.location.hostname) {
+      const hn = window.location.hostname;
+      const isLocalOrLan =
+        hn === 'localhost' ||
+        hn === '127.0.0.1' ||
+        /^192\.168\./.test(hn) ||
+        /^10\./.test(hn) ||
+        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hn);
+      if (isLocalOrLan && window.location.origin && window.location.origin.startsWith('http')) {
+        return window.location.origin;
+      }
     }
   }
   if (memoryHostUrl) return memoryHostUrl;
@@ -52,8 +64,8 @@ function resolveHostUrl(): string {
     : (import.meta as any)?.env?.VITE_HOST_URL;
   if (envUrl && typeof envUrl === 'string' && envUrl.length > 0) return envUrl;
 
-  // Safe default — will fail fast when no real host is configured
-  return 'http://localhost:9871';
+  // Safe default: Windows companion server runs on port 3000
+  return 'http://localhost:3000';
 }
 
 function resolveAdapterMode(): 'real' | 'mock' {
