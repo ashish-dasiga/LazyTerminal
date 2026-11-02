@@ -9,17 +9,23 @@ Write-Host ""
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if (Test-Path "$scriptDir\LazyTerminal-Windows-Setup.exe") {
-    Write-Host "Launching Native Windows Companion GUI..." -ForegroundColor Green
+    Write-Host "Launching Native Windows Companion Host..." -ForegroundColor Green
     Start-Process "$scriptDir\LazyTerminal-Windows-Setup.exe"
     exit 0
 }
 
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    Write-Host "Launching Python Tkinter Companion GUI..." -ForegroundColor Green
-    Start-Process python -ArgumentList "`"$scriptDir\lazy_terminal_companion.py`""
+if (Test-Path "$scriptDir\LazyTerminal-Windows-Host.exe") {
+    Write-Host "Launching Native Windows Companion Host..." -ForegroundColor Green
+    Start-Process "$scriptDir\LazyTerminal-Windows-Host.exe"
     exit 0
 }
 
-Write-Host "[ERROR] Neither standalone executable nor Python 3 found." -ForegroundColor Red
-Write-Host "Please download the .EXE installer or install Python 3.10+ from https://www.python.org/" -ForegroundColor Yellow
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    Write-Host "Launching Host Companion via npm..." -ForegroundColor Green
+    npm run host
+    exit 0
+}
+
+Write-Host "[ERROR] Standalone executable not found and Node.js/npm not detected." -ForegroundColor Red
+Write-Host "Please download LazyTerminal-Windows-Setup.exe or install Node.js 20+ from https://nodejs.org/" -ForegroundColor Yellow
 pause
