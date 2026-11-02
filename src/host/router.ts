@@ -1,8 +1,12 @@
 import express, { Request, Response, NextFunction, Router } from 'express';
+import os from 'os';
 import { HostConfig, loadHostConfig } from './config';
 import { createHostLogger, HostLogger } from './logger';
 import { PairingManager } from './pairingManager';
 import { TerminalSessionManager } from './terminalManager';
+import { fsRouter } from '../server/fsRoutes';
+import { gitRouter } from '../server/gitRoutes';
+import { shreyaRouter } from '../server/shreyaRouter';
 
 export interface HostCompanionContext {
   config: HostConfig;
@@ -13,7 +17,7 @@ export interface HostCompanionContext {
   shutdown: () => void;
 }
 
-function isLoopbackAddress(ip: string | undefined): boolean {
+export function isLoopbackAddress(ip: string | undefined): boolean {
   if (!ip) return false;
   return (
     ip === '127.0.0.1' ||
@@ -23,7 +27,7 @@ function isLoopbackAddress(ip: string | undefined): boolean {
   );
 }
 
-function extractSessionToken(req: Request): string | undefined {
+export function extractSessionToken(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.trim().length > 0) {
     return authHeader.replace(/^Bearer\s+/i, '').trim();
@@ -35,6 +39,9 @@ function extractSessionToken(req: Request): string | undefined {
   if (typeof req.query.sessionToken === 'string' && req.query.sessionToken.trim()) {
     return req.query.sessionToken.trim();
   }
+  if (typeof req.query.token === 'string' && req.query.token.trim()) {
+    return req.query.token.trim();
+  }
   return undefined;
 }
 
@@ -43,24 +50,30 @@ export function createHostCompanion(
   options?: { silentLogger?: boolean; nowFn?: () => number }
 ): HostCompanionContext {
   const baseConfig = loadHostConfig();
-  const config: HostConfig = { ...baseConfig, ...customConfig };
+  const config: HostConfig = {
+    ...baseConfig,
+    ...customConfig,
+    allowedRoots: customConfig?.allowedRoots
+      ? [...customConfig.allowedRoots]
+      : [...baseConfig.allowedRoots],
+  };
   const logger = createHostLogger({ silent: options?.silentLogger });
   const pairing = new PairingManager(config, logger, { nowFn: options?.nowFn });
   const terminal = new TerminalSessionManager(config, logger);
 
   const router = express.Router();
-  router.use(express.json({ limit: '256kb' }));
+  router.use(express.json({ limit: '10mb' }));
 
-  // Local CORS support for frontend dev server
+  // Local CORS support for frontend dev server, LAN browsers, and Capacitor WebView
   router.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-Session-Token'
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Session-Token'
     );
     res.setHeader(
       'Access-Control-Allow-Methods',
-      'GET, POST, DELETE, OPTIONS'
+      'GET, POST, PUT, DELETE, OPTIONS'
     );
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -106,7 +119,10 @@ export function createHostCompanion(
     next: NextFunction
   ) => {
     const token = extractSessionToken(req);
-    if (pairing.validateSessionToken(token) || isLoopbackAddress(req.ip || req.socket?.remoteAddress)) {
+    if (
+      pairing.validateSessionToken(token) ||
+      isLoopbackAddress(req.ip || req.socket?.remoteAddress)
+    ) {
       next();
       return;
     }
@@ -119,7 +135,8 @@ export function createHostCompanion(
     res.status(401).json({
       error: {
         code: 'AUTH_REQUIRED',
-        message: 'Host control endpoints require local loopback access or an authenticated session.',
+        message:
+          'Host control endpoints require local loopback access or an authenticated session.',
         retryable: false,
       },
     });
@@ -129,12 +146,15 @@ export function createHostCompanion(
   router.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',
+      service: 'lazy-terminal-host-companion',
       protocolVersion: '1.0',
+      hostName: os.hostname(),
       serverStatus: pairing.getServerStatus(),
+      timestamp: new Date().toISOString(),
     });
   });
 
-  // 2. Host-Local Pairing Key & Daemon Lifecycle (Laptop App UI)
+  // 2. Host-Local Pairing Key & Daemon Lifecycle (Laptop App UI & Python Companion UI)
   router.get(
     '/pairing/key',
     requireLoopbackOrSessionAuth,
@@ -172,11 +192,26 @@ export function createHostCompanion(
     }
   );
 
+  router.get(
+    '/host/local-status',
+    requireLoopbackOrSessionAuth,
+    (_req: Request, res: Response) => {
+      res.status(200).json({
+        ...pairing.getHostDeviceInfo({ includePairingToken: true }),
+        activeWorkspaceRoot: config.defaultWorkspaceRoot,
+      });
+    }
+  );
+
   router.post(
     '/host/daemon/control',
     requireLoopbackOrSessionAuth,
     (req: Request, res: Response) => {
-      const action = req.body?.status as 'start' | 'stop' | 'restart' | undefined;
+      const action = (req.body?.status || req.body?.action) as
+        | 'start'
+        | 'stop'
+        | 'restart'
+        | undefined;
       if (action !== 'start' && action !== 'stop' && action !== 'restart') {
         res.status(400).json({
           error: {
@@ -194,7 +229,9 @@ export function createHostCompanion(
       const statusRes = pairing.setHostServerStatus(action);
       res.status(200).json({
         ...statusRes,
-        ...(action !== 'stop' ? { pairingKey: pairing.getCurrentKeyEnvelope().pairingKey } : {}),
+        ...(action !== 'stop'
+          ? { pairingKey: pairing.getCurrentKeyEnvelope().pairingKey }
+          : {}),
       });
     }
   );
@@ -229,7 +266,10 @@ export function createHostCompanion(
       return;
     }
 
-    res.status(200).json(result);
+    res.status(200).json({
+      ...result,
+      activeWorkspaceRoot: config.defaultWorkspaceRoot,
+    });
   });
 
   router.post(
@@ -247,9 +287,10 @@ export function createHostCompanion(
     requireSessionAuth,
     (req: Request, res: Response) => {
       const isLocal = isLoopbackAddress(req.ip || req.socket?.remoteAddress);
-      res.status(200).json(
-        pairing.getHostDeviceInfo({ includePairingToken: isLocal })
-      );
+      res.status(200).json({
+        ...pairing.getHostDeviceInfo({ includePairingToken: isLocal }),
+        activeWorkspaceRoot: config.defaultWorkspaceRoot,
+      });
     }
   );
 
@@ -259,6 +300,25 @@ export function createHostCompanion(
     requireSessionAuth,
     (_req: Request, res: Response) => {
       res.status(200).json(terminal.listSessions());
+    }
+  );
+
+  router.get(
+    '/pty/sessions/:id',
+    requireSessionAuth,
+    (req: Request, res: Response) => {
+      const session = terminal.listSessions().find((s) => s.id === req.params.id);
+      if (!session) {
+        res.status(404).json({
+          error: {
+            code: 'SESSION_NOT_FOUND',
+            message: `Terminal session "${req.params.id}" was not found.`,
+            retryable: false,
+          },
+        });
+        return;
+      }
+      res.status(200).json(session);
     }
   );
 
@@ -286,6 +346,21 @@ export function createHostCompanion(
     }
   );
 
+  router.post(
+    '/pty/sessions/:id/resize',
+    requireSessionAuth,
+    (req: Request, res: Response) => {
+      const cols = Math.max(20, Math.min(500, Number(req.body?.cols) || 80));
+      const rows = Math.max(5, Math.min(200, Number(req.body?.rows) || 24));
+      res.status(200).json({
+        resized: true,
+        sessionId: String(req.params.id),
+        cols,
+        rows,
+      });
+    }
+  );
+
   router.delete(
     '/pty/sessions/:id',
     requireSessionAuth,
@@ -296,7 +371,9 @@ export function createHostCompanion(
   );
 
   const handleExecuteCommand = async (req: Request, res: Response) => {
-    const sessionId = String(req.params.id || req.body?.sessionId || 'sess-pwsh');
+    const sessionId = String(
+      req.params.id || req.body?.sessionId || 'sess-pwsh'
+    );
     const command = String(req.body?.command || '');
     const workingDir = String(req.body?.workingDir || '');
     const envOverrides = req.body?.envOverrides;
@@ -323,8 +400,14 @@ export function createHostCompanion(
     '/pty/sessions/:id/signal',
     requireSessionAuth,
     (req: Request, res: Response) => {
-      const sessionId = String(req.params.id || req.body?.sessionId || 'sess-pwsh');
-      const signal = req.body?.signal as 'SIGINT' | 'SIGTERM' | 'CLEAR' | undefined;
+      const sessionId = String(
+        req.params.id || req.body?.sessionId || 'sess-pwsh'
+      );
+      const signal = req.body?.signal as
+        | 'SIGINT'
+        | 'SIGTERM'
+        | 'CLEAR'
+        | undefined;
       if (signal !== 'SIGINT' && signal !== 'SIGTERM' && signal !== 'CLEAR') {
         res.status(400).json({
           error: {
@@ -361,6 +444,17 @@ export function createHostCompanion(
       });
     }
   );
+
+  // 5. Authenticated Filesystem, Git, CLI, Run/Debug, and Preview Subsystems
+  // Attach host config onto request locals so FS & Git routers enforce dynamic workspace roots
+  const attachHostConfig = (_req: Request, res: Response, next: NextFunction) => {
+    res.locals.hostConfig = config;
+    next();
+  };
+
+  router.use('/fs', requireSessionAuth, attachHostConfig, fsRouter);
+  router.use('/git', requireSessionAuth, attachHostConfig, gitRouter);
+  router.use('/', requireSessionAuth, attachHostConfig, shreyaRouter);
 
   return {
     config,

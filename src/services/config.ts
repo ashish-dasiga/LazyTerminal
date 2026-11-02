@@ -9,7 +9,7 @@
  */
 
 export interface AppConfig {
-  /** 'real' attempts network calls to the PC host; 'mock' uses the dev harness */
+  /** 'real' makes network calls to the PC host; 'mock' uses the isolated test harness */
   adapterMode: 'real' | 'mock';
   /** Base URL of the Windows PC companion (e.g. "http://192.168.1.142:9871") */
   hostBaseUrl: string;
@@ -26,78 +26,109 @@ export interface AppConfig {
 const LOCAL_STORAGE_HOST_KEY = 'lazy_terminal_host_url';
 const LOCAL_STORAGE_MODE_KEY = 'lazy_terminal_adapter_mode';
 
-// In-memory fallbacks when window/localStorage is unavailable (Node.js test environment)
 let memoryHostUrl: string | null = null;
 let memoryAdapterMode: 'real' | 'mock' | null = null;
 
+function isCapacitorAndroidWebView(): boolean {
+  if (typeof window === 'undefined') return false;
+  const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
+  if (cap?.isNativePlatform?.()) return true;
+  if (window.location?.protocol === 'capacitor:' || window.location?.protocol === 'file:') {
+    return true;
+  }
+  // Native Android WebView AssetLoader serves bundled assets from http://localhost (no port)
+  if (
+    window.location?.hostname === 'localhost' &&
+    !window.location?.port &&
+    typeof navigator !== 'undefined' &&
+    /Android/i.test(navigator.userAgent || '')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Read host URL from localStorage or memory fallback, falling back to env or a safe default.
- * Never returns a hard-coded real machine address — the user must configure it.
  */
 function resolveHostUrl(): string {
+  if (memoryHostUrl) return memoryHostUrl;
+
   if (typeof window !== 'undefined') {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_HOST_KEY);
-      if (stored && stored.trim().length > 0) return stored.trim();
+      if (stored && stored.trim().length > 0) return stored.trim().replace(/\/+$/, '');
     } catch {}
+  }
 
-    // Only use window.location.origin if it is a local host or private LAN IP
-    // Never treat GitHub Pages or public static hosting as the PC companion host!
-    if (window.location && window.location.hostname) {
-      const hn = window.location.hostname;
-      const isLocalOrLan =
-        hn === 'localhost' ||
-        hn === '127.0.0.1' ||
-        /^192\.168\./.test(hn) ||
-        /^10\./.test(hn) ||
-        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hn);
-      if (isLocalOrLan && window.location.origin && window.location.origin.startsWith('http')) {
-        return window.location.origin;
-      }
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
+  const envUrl =
+    (typeof process !== 'undefined' &&
+      (process.env?.VITE_HOST_API_URL || process.env?.VITE_HOST_URL)) ||
+    metaEnv?.VITE_HOST_API_URL ||
+    metaEnv?.VITE_HOST_URL;
+
+  // In native Android APK / Capacitor WebView, window.location.origin is the phone's local asset server,
+  // NOT the Windows PC. Default to 10.0.2.2:9871 (Android Emulator loopback to Windows host) until user sets LAN IP.
+  if (isCapacitorAndroidWebView()) {
+    if (envUrl && typeof envUrl === 'string' && envUrl.trim().length > 0) {
+      return envUrl.trim().replace(/\/+$/, '');
+    }
+    return 'http://10.0.2.2:9871';
+  }
+
+  if (typeof window !== 'undefined' && window.location && window.location.hostname) {
+    const hn = window.location.hostname;
+    const isLocalOrLan =
+      hn === 'localhost' ||
+      hn === '127.0.0.1' ||
+      /^192\.168\./.test(hn) ||
+      /^10\./.test(hn) ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hn);
+    if (isLocalOrLan && window.location.origin && window.location.origin.startsWith('http')) {
+      return window.location.origin.replace(/\/+$/, '');
     }
   }
-  if (memoryHostUrl) return memoryHostUrl;
 
-  // Vite injects import.meta.env at build time
-  const envUrl = typeof process !== 'undefined'
-    ? process.env?.VITE_HOST_URL
-    : (import.meta as any)?.env?.VITE_HOST_URL;
-  if (envUrl && typeof envUrl === 'string' && envUrl.length > 0) return envUrl;
+  if (envUrl && typeof envUrl === 'string' && envUrl.trim().length > 0) {
+    return envUrl.trim().replace(/\/+$/, '');
+  }
 
-  // Safe default: Windows companion server runs on port 3000
-  return 'http://localhost:3000';
+  return 'http://127.0.0.1:9871';
 }
 
 function resolveAdapterMode(): 'real' | 'mock' {
+  if (memoryAdapterMode) return memoryAdapterMode;
+
   if (typeof window !== 'undefined') {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_MODE_KEY);
       if (stored === 'real' || stored === 'mock') return stored;
     } catch {}
   }
-  if (memoryAdapterMode) return memoryAdapterMode;
 
-  const envMode = typeof process !== 'undefined'
-    ? process.env?.VITE_ADAPTER_MODE
-    : (import.meta as any)?.env?.VITE_ADAPTER_MODE;
-  if (envMode === 'real') return 'real';
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
+  const envMode =
+    (typeof process !== 'undefined' ? process.env?.VITE_ADAPTER_MODE : undefined) ||
+    metaEnv?.VITE_ADAPTER_MODE;
 
-  // Default to mock for safe development
-  return 'mock';
+  if (envMode === 'mock') return 'mock';
+  return 'real';
 }
 
 export function getAppConfig(): AppConfig {
   const hostBaseUrl = resolveHostUrl();
   const wsProtocol = hostBaseUrl.startsWith('https') ? 'wss' : 'ws';
   const wsHost = hostBaseUrl.replace(/^https?:\/\//, '');
+  const adapterMode = resolveAdapterMode();
 
   return {
-    adapterMode: resolveAdapterMode(),
+    adapterMode,
     hostBaseUrl,
     hostWsUrl: `${wsProtocol}://${wsHost}/ws`,
     requestTimeoutMs: 10_000,
-    maxRetries: 2,
-    debugLogging: resolveAdapterMode() === 'mock',
+    maxRetries: 1,
+    debugLogging: adapterMode === 'mock',
   };
 }
 

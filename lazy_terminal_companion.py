@@ -1,38 +1,54 @@
 """
 Lazy Terminal — Windows PC Companion Desktop Application (Tkinter Glass Effect Theme)
 
-Features:
-1. Native Windows 11 / 10 Dark Mode Titlebar & Glass Effect Theme.
-2. High-quality rendered brand logo & subtle frosted-glass background composite using Pillow (PIL).
-3. Token-only standby view with large monospace token, copy to clipboard, and host LAN IP discovery.
-4. Embedded background HTTP server on 0.0.0.0:3000 (with 9871 fallback) accepting live LAN pairing
-   from Android phones & mobile browsers without CORS or HTML errors.
-5. Dynamic transition to Connected View upon successful mobile pairing (revealing Sync Manager,
-   Server Control, and live intent synchronization).
+Delegates all HTTP / PTY / Filesystem / Git / AI CLI operations to the real
+Windows Host Companion (`src/host/companionServer.ts`) so pairing, PowerShell,
+Explorer, Git, and CLI sessions share one authenticated host runtime.
 """
 
-import sys
+import argparse
+import atexit
+import ctypes
+import json
 import os
-import random
+import shutil
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
-import json
-import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import tkinter as tk
-from tkinter import ttk, messagebox
-from PIL import Image, ImageFilter, ImageDraw, ImageTk
+import urllib.error
+import urllib.request
+
+try:
+    import tkinter as tk
+    from tkinter import ttk
+except Exception:
+    tk = None
+    ttk = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFilter = None
+    ImageTk = None
 
 
-# Resource path resolver (supports PyInstaller --onefile)
+def get_repo_root():
+    if "__file__" in globals():
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
 def get_resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
+    if hasattr(sys, "_MEIPASS"):
         p = os.path.join(sys._MEIPASS, relative_path)
         if os.path.exists(p):
             return p
-    script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
-    candidate = os.path.join(script_dir, relative_path)
+    candidate = os.path.join(get_repo_root(), relative_path)
     if os.path.exists(candidate):
         return candidate
     if os.path.exists(relative_path):
@@ -40,14 +56,10 @@ def get_resource_path(relative_path):
     return None
 
 
-# Windows 11 / 10 Dark Mode Titlebar
 def enable_windows_dark_titlebar(window):
     try:
-        import ctypes
         window.update()
-        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-        if not hwnd:
-            hwnd = window.winfo_id()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(2)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -61,245 +73,178 @@ def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.3)
-        s.connect(('8.8.8.8', 80))
+        s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
     except Exception:
-        return '127.0.0.1'
+        return "127.0.0.1"
 
 
-INITIAL_SYNCS = [
-    {
-        "id": "SYNC-REQ-104",
-        "timestamp": "2026-10-25 00:15:22",
-        "time_ago": "2 mins ago",
-        "items": 3,
-        "summary": "Offline intent queue flushed & causal graph synced with host",
-        "head_commit": "3f7a8b1",
-    },
-    {
-        "id": "SYNC-REQ-103",
-        "timestamp": "2026-10-24 23:45:10",
-        "time_ago": "32 mins ago",
-        "items": 2,
-        "summary": "Workspace file tree & dirty state synced across tunnel",
-        "head_commit": "3f7a8b1",
-    },
-    {
-        "id": "SYNC-REQ-102",
-        "timestamp": "2026-10-24 22:58:04",
-        "time_ago": "1 hour ago",
-        "items": 5,
-        "summary": "Branch checkout and remote ref synchronization",
-        "head_commit": "a9c210d",
-    },
-]
-
-
-# ---------------------------------------------------------------------------
-# Embedded Multithreaded Companion HTTP Server (Zero-Dependency)
-# ---------------------------------------------------------------------------
-
-class CompanionHttpServer(HTTPServer):
-    def __init__(self, server_address, RequestHandlerClass, app_instance):
-        super().__init__(server_address, RequestHandlerClass)
-        self.app = app_instance
-
-
-class CompanionRequestHandler(BaseHTTPRequestHandler):
-    def _send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self._send_cors_headers()
-        self.end_headers()
-
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        app = self.server.app
-
-        if parsed.path in ("/health", "/api/v1/host/status"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            payload = {
-                "status": "ok",
-                "serverStatus": "running" if app.is_server_running else "stopped",
-                "hostname": app.hostname,
-                "ip": app.local_ip,
-                "port": app.host_port,
-                "isConnected": app.is_connected,
-                "pairingToken": app.pairing_token
-            }
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
-
-        elif parsed.path == "/api/v1/pairing/key":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"pairingKey": app.pairing_token}).encode("utf-8"))
-
-        else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": f"Endpoint {parsed.path} not found on host"}).encode("utf-8"))
-
-    def do_POST(self):
-        parsed = urllib.parse.urlparse(self.path)
-        app = self.server.app
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+def is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            data = json.loads(body)
+            s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
+
+def local_api_json(port: int, path: str, method: str = "GET", payload: dict = None, timeout: float = 3.0):
+    url = f"http://127.0.0.1:{port}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+class HostBackendProcessManager:
+    """Starts and manages the real Node/TypeScript Windows Host Companion."""
+
+    def __init__(self, preferred_port: int = 3000):
+        self.preferred_port = preferred_port
+        self.port = preferred_port
+        self.proc = None
+        self.owns_process = False
+        atexit.register(self.stop)
+
+    def start(self) -> int:
+        # Reuse already-running Lazy Terminal host companion if listening on preferred_port
+        try:
+            health = local_api_json(self.preferred_port, "/health", timeout=1.0)
+            if health.get("status") == "ok" and health.get("service") == "lazy-terminal-host-companion":
+                self.port = self.preferred_port
+                self.owns_process = False
+                return self.port
         except Exception:
-            data = {}
+            pass
 
-        if parsed.path in ("/api/v1/tunnel/connect", "/api/v1/pairing/validate"):
-            incoming_key = str(data.get("pairingKey") or data.get("token") or "")
-            norm_in = incoming_key.replace(" ", "").replace("-", "").strip().lower()
-            norm_target = app.pairing_token.replace(" ", "").replace("-", "").strip().lower()
+        candidate_ports = [self.preferred_port, 9871, 3000, 3001, 8080]
+        chosen_port = None
+        for p in dict.fromkeys(candidate_ports):
+            if is_port_free(p):
+                chosen_port = p
+                break
+        if chosen_port is None:
+            raise RuntimeError("No available TCP port found for Lazy Terminal Host Companion.")
 
-            if norm_in and norm_in == norm_target:
-                # Valid token! Establish encrypted tunnel & reveal Sync Manager
-                app.is_connected = True
-                app.root.after(0, app.build_ui)
-                app.root.after(0, lambda: app.show_toast("Mobile device connected via Wi-Fi! Sync unlocked."))
+        self.port = chosen_port
+        repo_root = get_repo_root()
+        node_bin = shutil.which("node") or "node"
+        companion_entry = os.path.join(repo_root, "src", "host", "companionServer.ts")
 
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self._send_cors_headers()
-                self.end_headers()
-                resp = {
-                    "success": True,
-                    "sessionToken": f"sess_{int(time.time())}",
-                    "device": {
-                        "id": f"win-companion-{app.hostname}",
-                        "name": app.hostname,
-                        "os": "Windows 11 x64",
-                        "isOnline": True,
-                        "tunnelStatus": "active",
-                        "backendServerStatus": "running"
-                    }
-                }
-                self.wfile.write(json.dumps(resp).encode("utf-8"))
-            else:
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self._send_cors_headers()
-                self.end_headers()
-                resp = {
-                    "success": False,
-                    "errorMessage": f"Incorrect pairing code \"{incoming_key}\". Please check the 6-digit key displayed on your Windows PC screen."
-                }
-                self.wfile.write(json.dumps(resp).encode("utf-8"))
+        env = os.environ.copy()
+        env["LAZY_TERMINAL_HOST_PORT"] = str(self.port)
+        env["LAZY_TERMINAL_HOST_BIND"] = env.get("LAZY_TERMINAL_HOST_BIND", "0.0.0.0")
 
-        elif parsed.path == "/api/v1/pairing/generate":
-            app.root.after(0, app.handle_regenerate_token)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"pairingKey": app.pairing_token}).encode("utf-8"))
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
-        elif parsed.path == "/api/v1/tunnel/disconnect":
-            app.is_connected = False
-            app.root.after(0, app.build_ui)
-            app.root.after(0, lambda: app.show_toast("Mobile device disconnected. Waiting for connection."))
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
+        self.proc = subprocess.Popen(
+            [node_bin, "--import", "tsx", companion_entry],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=creationflags,
+        )
+        self.owns_process = True
 
-        elif parsed.path == "/api/v1/sync/run":
-            app.root.after(0, app.handle_sync_request)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "records": app.sync_records}).encode("utf-8"))
+        # Drain stdout in background so pipe never blocks
+        def _drain():
+            if not self.proc or not self.proc.stdout:
+                return
+            for line in self.proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
 
-        else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": f"Endpoint {parsed.path} not found"}).encode("utf-8"))
+        threading.Thread(target=_drain, daemon=True).start()
 
-    def log_message(self, format, *args):
-        # Silence default stderr logging for clean console
-        pass
+        # Wait until /health responds
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"Host companion exited prematurely with code {self.proc.returncode}")
+            try:
+                health = local_api_json(self.port, "/health", timeout=1.0)
+                if health.get("status") == "ok":
+                    return self.port
+            except Exception:
+                time.sleep(0.25)
 
+        raise RuntimeError(f"Timed out waiting for Windows Host Companion on port {self.port}")
 
-# ---------------------------------------------------------------------------
-# LazyTerminalCompanionApp GUI
-# ---------------------------------------------------------------------------
+    def stop(self):
+        if not self.owns_process or not self.proc:
+            return
+        proc = self.proc
+        self.proc = None
+        if proc.poll() is None:
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    proc.terminate()
+            except Exception:
+                pass
+
 
 class LazyTerminalCompanionApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root, backend_manager: HostBackendProcessManager):
         self.root = root
+        self.backend = backend_manager
         self.root.title("Lazy Terminal — Windows PC Host Companion")
         self.root.geometry("820x620")
         self.root.minsize(760, 560)
         self.root.configure(bg="#090d16")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         enable_windows_dark_titlebar(self.root)
 
-        # State
-        self.hostname = os.environ.get("COMPUTERNAME", "DESKTOP-WIN11-PRO")
+        self.hostname = socket.gethostname()
         self.local_ip = get_local_ip()
-        self.host_port = 3000
-        self.pairing_token = self.generate_random_token()
+        self.host_port = self.backend.port
+        self.pairing_token = "--- ---"
+        self.active_workspace = os.getcwd()
         self.is_connected = False
         self.is_server_running = True
-        self.sync_records = list(INITIAL_SYNCS)
-        self.selected_sync_id = self.sync_records[0]["id"]
-        self.is_syncing = False
+        self.intents_processed = 0
         self.toast_message = ""
         self.toast_timer = None
-        self.httpd = None
 
-        # Icon and background assets
         self.icon_photo = None
         self.bg_photo = None
         self.prepare_images()
-
-        # Styles
         self.setup_styles()
 
-        # Main Layout Containers
-        self.bg_label = None
         self.main_container = None
         self.header_frame = None
         self.toast_frame = None
         self.content_frame = None
         self.footer_frame = None
 
-        # Build initial UI
+        self.refresh_from_backend(initial=True)
         self.build_ui()
+        self.schedule_poll()
 
-        # Start embedded companion HTTP server in daemon thread
-        self.start_embedded_server()
-
-    def generate_random_token(self) -> str:
-        part1 = f"{random.randint(100, 999)}"
-        part2 = f"{random.randint(100, 999)}"
-        return f"{part1}-{part2}"
+    def on_close(self):
+        self.backend.stop()
+        self.root.destroy()
 
     def prepare_images(self):
-        """Prepare high-quality rounded app icon and glass background composite."""
-        icon_path = get_resource_path("icon.jpeg")
-        if not icon_path or not os.path.exists(icon_path):
-            icon_path = get_resource_path("public/downloads/icon.jpeg")
-
+        if Image is None or ImageTk is None:
+            return
+        icon_path = get_resource_path("icon.jpeg") or get_resource_path("public/downloads/icon.jpeg")
         raw_icon = None
         if icon_path and os.path.exists(icon_path):
             try:
@@ -307,13 +252,11 @@ class LazyTerminalCompanionApp:
             except Exception:
                 raw_icon = None
 
-        # Fallback if image missing
         if raw_icon is None:
             raw_icon = Image.new("RGBA", (192, 192), (37, 99, 235, 255))
             d = ImageDraw.Draw(raw_icon)
             d.rectangle([(20, 20), (172, 172)], fill=(56, 189, 248, 255))
 
-        # 1. High-Res Rounded App Icon (72x72) with anti-aliasing
         icon_size = (72, 72)
         resized_icon = raw_icon.resize(icon_size, Image.Resampling.LANCZOS)
         mask = Image.new("L", icon_size, 0)
@@ -321,35 +264,33 @@ class LazyTerminalCompanionApp:
         draw.rounded_rectangle([(0, 0), icon_size], radius=16, fill=255)
         resized_icon.putalpha(mask)
 
-        # Subtle glowing cyan/blue border
         icon_with_border = Image.new("RGBA", (76, 76), (0, 0, 0, 0))
         border_draw = ImageDraw.Draw(icon_with_border)
-        border_draw.rounded_rectangle([(0, 0), (75, 75)], radius=18, fill=(30, 41, 59, 220), outline=(56, 189, 248, 200), width=2)
+        border_draw.rounded_rectangle(
+            [(0, 0), (75, 75)],
+            radius=18,
+            fill=(30, 41, 59, 220),
+            outline=(56, 189, 248, 200),
+            width=2,
+        )
         icon_with_border.paste(resized_icon, (2, 2), resized_icon)
-
         self.icon_photo = ImageTk.PhotoImage(icon_with_border)
 
-        # 2. Glassmorphic Background Canvas with Blurred Watermark
         W, H = 840, 640
         bg = Image.new("RGBA", (W, H), (9, 13, 22, 255))
-
-        # Blurred ambient watermark in top right
         try:
             watermark = raw_icon.resize((380, 380), Image.Resampling.LANCZOS)
             watermark = watermark.filter(ImageFilter.GaussianBlur(32))
-            # Lower alpha to 14%
             r, g, b, a = watermark.split()
             a = a.point(lambda p: int(p * 0.14))
             watermark.putalpha(a)
             bg.paste(watermark, (W - 320, -60), watermark)
 
-            # Left ambient subtle glow
             left_glow = Image.new("RGBA", (280, 280), (14, 165, 233, 25))
             left_glow = left_glow.filter(ImageFilter.GaussianBlur(40))
             bg.paste(left_glow, (-80, 160), left_glow)
         except Exception:
             pass
-
         self.bg_photo = ImageTk.PhotoImage(bg)
 
     def setup_styles(self):
@@ -359,81 +300,76 @@ class LazyTerminalCompanionApp:
         style.configure("TFrame", background="#090d16")
         style.configure("Glass.TFrame", background="#121622")
         style.configure("TLabel", background="#090d16", foreground="#f8fafc", font=("Segoe UI", 9))
-        style.configure("Muted.TLabel", foreground="#64748b", font=("Segoe UI", 8))
 
-    def start_embedded_server(self):
-        """Starts the companion HTTP server on 0.0.0.0:3000 (fallback 9871)."""
-        def _serve():
-            ports = [3000, 9871, 3001, 8080]
-            for p in ports:
-                try:
-                    server_address = ("0.0.0.0", p)
-                    self.httpd = CompanionHttpServer(server_address, CompanionRequestHandler, self)
-                    self.host_port = p
-                    break
-                except OSError:
-                    continue
+    def refresh_from_backend(self, initial: bool = False):
+        changed = False
+        try:
+            status = local_api_json(self.host_port, "/api/v1/host/local-status", timeout=1.5)
+            new_token = status.get("pairingToken") or self.pairing_token
+            new_running = status.get("backendServerStatus") == "running"
+            new_connected = status.get("tunnelStatus") == "active"
+            new_ws = status.get("activeWorkspaceRoot") or self.active_workspace
+            new_count = int(status.get("totalIntentsProcessed") or 0)
 
-            if self.httpd:
-                try:
-                    self.httpd.serve_forever()
-                except Exception:
-                    pass
+            if (
+                new_token != self.pairing_token
+                or new_running != self.is_server_running
+                or new_connected != self.is_connected
+                or new_ws != self.active_workspace
+                or new_count != self.intents_processed
+            ):
+                changed = True
+                self.pairing_token = new_token
+                self.is_server_running = new_running
+                self.is_connected = new_connected
+                self.active_workspace = new_ws
+                self.intents_processed = new_count
+        except Exception:
+            pass
 
-        t = threading.Thread(target=_serve, daemon=True)
-        t.start()
+        if changed and not initial:
+            self.build_ui()
+
+    def schedule_poll(self):
+        self.refresh_from_backend()
+        self.root.after(1500, self.schedule_poll)
 
     def build_ui(self):
-        # Clear existing widgets
         for w in self.root.winfo_children():
             w.destroy()
 
-        # Background Canvas with Glass Effect Image
         bg_canvas = tk.Canvas(self.root, width=820, height=620, highlightthickness=0, bg="#090d16")
         bg_canvas.pack(fill=tk.BOTH, expand=True)
         if self.bg_photo:
             bg_canvas.create_image(0, 0, image=self.bg_photo, anchor="nw")
-
-        # Top Neon Cyan Accent Line
         bg_canvas.create_line(0, 0, 1200, 0, fill="#38bdf8", width=3)
 
-        # Main wrapper placed over the canvas
         self.main_container = tk.Frame(bg_canvas, bg="#090d16", bd=0)
         self.main_container.place(relx=0.5, rely=0.5, anchor="center", width=780, height=580)
 
-        # 1. Top Header with Real Brand Logo
-        self.header_frame = tk.Frame(self.main_container, bg="#0e131f", bd=1, relief="solid", highlightbackground="#1e293b", padx=16, pady=12)
+        self.header_frame = tk.Frame(
+            self.main_container, bg="#0e131f", bd=1, relief="solid", highlightbackground="#1e293b", padx=16, pady=12
+        )
         self.header_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Brand Icon
         if self.icon_photo:
             icon_lbl = tk.Label(self.header_frame, image=self.icon_photo, bg="#0e131f")
             icon_lbl.pack(side=tk.LEFT, padx=(0, 14))
 
-        # Title and description
         title_box = tk.Frame(self.header_frame, bg="#0e131f")
         title_box.pack(side=tk.LEFT, fill=tk.Y)
 
-        title_lbl = tk.Label(
+        tk.Label(
+            title_box, text="LAZY TERMINAL", bg="#0e131f", fg="#ffffff", font=("Segoe UI", 16, "bold")
+        ).pack(anchor="w")
+        tk.Label(
             title_box,
-            text="LAZY TERMINAL",
-            bg="#0e131f",
-            fg="#ffffff",
-            font=("Segoe UI", 16, "bold"),
-            lettercase="uppercase" if hasattr(str, 'lettercase') else None
-        )
-        title_lbl.pack(anchor="w")
-
-        sub_lbl = tk.Label(
-            title_box,
-            text="Windows PC Host Companion • Local-First Encrypted Dev Tunnel",
+            text="Windows PC Host Companion • Local-First Authenticated Dev Host",
             bg="#0e131f",
             fg="#38bdf8",
-            font=("Segoe UI", 9)
-        )
-        sub_lbl.pack(anchor="w", pady=(1, 0))
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(1, 0))
 
-        # Status Badge on Header Right
         h_right = tk.Frame(self.header_frame, bg="#0e131f")
         h_right.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -441,7 +377,7 @@ class LazyTerminalCompanionApp:
         status_fg = "#34d399" if self.is_connected else "#fbbf24"
         status_bg = "#064e3b" if self.is_connected else "#2b1e06"
 
-        stat_badge = tk.Label(
+        tk.Label(
             h_right,
             text=f" {status_text} ",
             bg=status_bg,
@@ -449,27 +385,30 @@ class LazyTerminalCompanionApp:
             font=("Consolas", 9, "bold"),
             bd=1,
             relief="solid",
-            highlightbackground=status_fg
-        )
-        stat_badge.pack(anchor="e", pady=(2, 4))
+            highlightbackground=status_fg,
+        ).pack(anchor="e", pady=(2, 4))
 
-        host_info_lbl = tk.Label(
+        tk.Label(
             h_right,
             text=f"Host: {self.local_ip}:{self.host_port}",
             bg="#0e131f",
             fg="#94a3b8",
-            font=("Consolas", 8)
-        )
-        host_info_lbl.pack(anchor="e")
+            font=("Consolas", 8),
+        ).pack(anchor="e")
 
-        # 2. Toast Alert Banner (if active)
         if self.toast_message:
-            self.toast_frame = tk.Frame(self.main_container, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=12, pady=6)
+            self.toast_frame = tk.Frame(
+                self.main_container, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=12, pady=6
+            )
             self.toast_frame.pack(fill=tk.X, pady=(0, 8))
-            t_lbl = tk.Label(self.toast_frame, text=f"✓  {self.toast_message}", bg="#064e3b", fg="#ecfdf5", font=("Segoe UI", 9, "bold"))
-            t_lbl.pack(side=tk.LEFT)
+            tk.Label(
+                self.toast_frame,
+                text=f"✓  {self.toast_message}",
+                bg="#064e3b",
+                fg="#ecfdf5",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(side=tk.LEFT)
 
-        # 3. Dynamic Center Content: Token-Only Standby OR Connected Dashboard
         self.content_frame = tk.Frame(self.main_container, bg="#090d16")
         self.content_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -478,54 +417,41 @@ class LazyTerminalCompanionApp:
         else:
             self.render_connected_view()
 
-        # 4. Minimal Footer
-        self.footer_frame = tk.Frame(self.main_container, bg="#0c1018", bd=1, relief="solid", highlightbackground="#1b2434", padx=12, pady=6)
+        self.footer_frame = tk.Frame(
+            self.main_container, bg="#0c1018", bd=1, relief="solid", highlightbackground="#1b2434", padx=12, pady=6
+        )
         self.footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
 
-        footer_left = tk.Label(
+        tk.Label(
             self.footer_frame,
-            text="🔒 Mutual Ed25519 Token Authentication • Zero Cloud Relay (₹0 Local-First MVP)",
-            bg="#0c1018", fg="#64748b", font=("Segoe UI", 8)
-        )
-        footer_left.pack(side=tk.LEFT)
+            text=f"Workspace: {self.active_workspace}",
+            bg="#0c1018",
+            fg="#64748b",
+            font=("Consolas", 8),
+        ).pack(side=tk.LEFT)
 
-        footer_right = tk.Label(
+        tk.Label(
             self.footer_frame,
-            text=f"LAN: {self.local_ip}:{self.host_port}  •  OS: Windows 11 x64",
-            bg="#0c1018", fg="#64748b", font=("Consolas", 8)
-        )
-        footer_right.pack(side=tk.RIGHT)
+            text=f"LAN: {self.local_ip}:{self.host_port}  •  Host: {self.hostname}",
+            bg="#0c1018",
+            fg="#64748b",
+            font=("Consolas", 8),
+        ).pack(side=tk.RIGHT)
 
     def render_token_standby_view(self):
-        """
-        Token-Only Standby View:
-        Displays the randomly generated pairing token ONLY in a modern glassmorphic card.
-        """
         card = tk.Frame(
-            self.content_frame,
-            bg="#121724",
-            bd=1,
-            relief="solid",
-            highlightbackground="#243147",
-            padx=28,
-            pady=24
+            self.content_frame, bg="#121724", bd=1, relief="solid", highlightbackground="#243147", padx=28, pady=24
         )
         card.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        # Subtle card header
         c_top = tk.Frame(card, bg="#121724")
         c_top.pack(fill=tk.X, pady=(0, 16))
 
-        tag_lbl = tk.Label(
-            c_top,
-            text="AUTHENTICATION KEY",
-            bg="#121724",
-            fg="#38bdf8",
-            font=("Segoe UI", 9, "bold")
-        )
-        tag_lbl.pack(side=tk.LEFT)
+        tk.Label(
+            c_top, text="AUTHENTICATION KEY", bg="#121724", fg="#38bdf8", font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT)
 
-        wait_lbl = tk.Label(
+        tk.Label(
             c_top,
             text="● WAITING FOR MOBILE PAIRING",
             bg="#2a1e06",
@@ -534,47 +460,30 @@ class LazyTerminalCompanionApp:
             padx=8,
             pady=2,
             bd=1,
-            relief="solid"
-        )
-        wait_lbl.pack(side=tk.RIGHT)
-
-        # Big Monospace Token Box
-        token_container = tk.Frame(
-            card,
-            bg="#080c14",
-            bd=1,
             relief="solid",
-            highlightbackground="#1c273b",
-            padx=24,
-            pady=20
+        ).pack(side=tk.RIGHT)
+
+        token_container = tk.Frame(
+            card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1c273b", padx=24, pady=20
         )
         token_container.pack(fill=tk.X, pady=(0, 16))
 
-        tok_title = tk.Label(
-            token_container,
-            text="Active Pairing Code",
-            bg="#080c14",
-            fg="#94a3b8",
-            font=("Segoe UI", 10)
-        )
-        tok_title.pack(anchor="center", pady=(0, 6))
+        tk.Label(
+            token_container, text="Active Pairing Code", bg="#080c14", fg="#94a3b8", font=("Segoe UI", 10)
+        ).pack(anchor="center", pady=(0, 6))
 
-        # Huge Cyan Token Display
-        self.token_display_lbl = tk.Label(
+        tk.Label(
             token_container,
             text=self.pairing_token,
             bg="#080c14",
             fg="#38bdf8",
             font=("Consolas", 34, "bold"),
-            lettercase=None
-        )
-        self.token_display_lbl.pack(anchor="center", pady=(2, 6))
+        ).pack(anchor="center", pady=(2, 6))
 
-        # Glass Action Buttons Bar
         actions_bar = tk.Frame(token_container, bg="#080c14")
         actions_bar.pack(anchor="center", pady=(6, 0))
 
-        copy_btn = tk.Button(
+        tk.Button(
             actions_bar,
             text="📋 Copy Code",
             bg="#1e293b",
@@ -588,11 +497,10 @@ class LazyTerminalCompanionApp:
             padx=14,
             pady=6,
             cursor="hand2",
-            command=self.handle_copy_token
-        )
-        copy_btn.pack(side=tk.LEFT, padx=(0, 8))
+            command=self.handle_copy_token,
+        ).pack(side=tk.LEFT, padx=(0, 8))
 
-        regen_btn = tk.Button(
+        tk.Button(
             actions_bar,
             text="🔄 Rotate Key",
             bg="#131b2c",
@@ -606,40 +514,37 @@ class LazyTerminalCompanionApp:
             padx=12,
             pady=6,
             cursor="hand2",
-            command=self.handle_regenerate_token
-        )
-        regen_btn.pack(side=tk.LEFT)
+            command=self.handle_regenerate_token,
+        ).pack(side=tk.LEFT)
 
-        # Helper & LAN discovery card
-        lan_card = tk.Frame(card, bg="#0c111c", bd=1, relief="solid", highlightbackground="#1c273b", padx=16, pady=12)
+        lan_card = tk.Frame(
+            card, bg="#0c111c", bd=1, relief="solid", highlightbackground="#1c273b", padx=16, pady=12
+        )
         lan_card.pack(fill=tk.X, pady=(6, 0))
 
-        lan_title = tk.Label(
+        tk.Label(
             lan_card,
             text="📱 Connecting Your Phone Over Local Wi-Fi:",
             bg="#0c111c",
             fg="#e2e8f0",
-            font=("Segoe UI", 9, "bold")
-        )
-        lan_title.pack(anchor="w", pady=(0, 4))
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
 
-        lan_desc = tk.Label(
+        tk.Label(
             lan_card,
-            text=f"1. Ensure your Android phone is on the same Wi-Fi.\n"
-                 f"2. Open the Lazy Terminal app on Android and enter the pairing code above.\n"
-                 f"3. Host LAN URL: http://{self.local_ip}:{self.host_port} (listening on all local network interfaces).",
+            text=(
+                "1. Ensure your Android phone is on the same Wi-Fi.\n"
+                "2. Open Lazy Terminal on Android, set Host URL below, and enter the pairing code.\n"
+                f"3. Host LAN URL: http://{self.local_ip}:{self.host_port}"
+            ),
             bg="#0c111c",
             fg="#94a3b8",
             font=("Segoe UI", 9),
-            justify=tk.LEFT
-        )
-        lan_desc.pack(anchor="w", pady=(0, 6))
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 6))
 
-        lan_btn_row = tk.Frame(lan_card, bg="#0c111c")
-        lan_btn_row.pack(anchor="w")
-
-        copy_ip_btn = tk.Button(
-            lan_btn_row,
+        tk.Button(
+            lan_card,
             text=f"📋 Copy Host URL (http://{self.local_ip}:{self.host_port})",
             bg="#172033",
             fg="#38bdf8",
@@ -651,29 +556,26 @@ class LazyTerminalCompanionApp:
             padx=10,
             pady=4,
             cursor="hand2",
-            command=self.handle_copy_host_url
-        )
-        copy_ip_btn.pack(side=tk.LEFT)
+            command=self.handle_copy_host_url,
+        ).pack(anchor="w")
 
     def render_connected_view(self):
-        """
-        Connected View:
-        Dynamically revealed once paired — shows the Sync Manager, Server Control, and live intent logs.
-        """
-        # 1. Connected Success Banner
-        banner = tk.Frame(self.content_frame, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=14, pady=10)
+        banner = tk.Frame(
+            self.content_frame, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=14, pady=10
+        )
         banner.pack(fill=tk.X, pady=(0, 10))
 
-        b_text = tk.Label(
+        tk.Label(
             banner,
-            text="✓  MOBILE DEVICE PAIRED OVER LOCAL LAN — Encrypted Tunnel Active (Port 3000)",
-            bg="#064e3b", fg="#ecfdf5", font=("Segoe UI", 9, "bold")
-        )
-        b_text.pack(side=tk.LEFT)
+            text=f"✓  MOBILE DEVICE PAIRED OVER LOCAL LAN — Port {self.host_port}",
+            bg="#064e3b",
+            fg="#ecfdf5",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side=tk.LEFT)
 
-        disc_btn = tk.Button(
+        tk.Button(
             banner,
-            text="Disconnect",
+            text="Rotate Key & Disconnect",
             bg="#991b1b",
             fg="#fee2e2",
             activebackground="#b91c1c",
@@ -682,51 +584,66 @@ class LazyTerminalCompanionApp:
             padx=10,
             pady=3,
             cursor="hand2",
-            command=self.handle_disconnect
+            command=self.handle_disconnect,
+        ).pack(side=tk.RIGHT)
+
+        srv_card = tk.Frame(
+            self.content_frame, bg="#101522", bd=1, relief="solid", highlightbackground="#1f2a3d", padx=16, pady=14
         )
-        disc_btn.pack(side=tk.RIGHT)
-
-        # 2. Two-Column Dashboard: Server Control (Left) & Sync Manager (Right)
-        dash_grid = tk.Frame(self.content_frame, bg="#090d16")
-        dash_grid.pack(fill=tk.BOTH, expand=True)
-
-        dash_grid.columnconfigure(0, weight=4)
-        dash_grid.columnconfigure(1, weight=6)
-        dash_grid.rowconfigure(0, weight=1)
-
-        # --- LEFT: Server Control Glass Card ---
-        srv_card = tk.Frame(dash_grid, bg="#101522", bd=1, relief="solid", highlightbackground="#1f2a3d", padx=14, pady=12)
-        srv_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        srv_card.pack(fill=tk.BOTH, expand=True)
 
         sc_title_row = tk.Frame(srv_card, bg="#101522")
         sc_title_row.pack(fill=tk.X, pady=(0, 10))
 
-        sc_title = tk.Label(sc_title_row, text="⚡ Server Control", bg="#101522", fg="#ffffff", font=("Segoe UI", 10, "bold"))
-        sc_title.pack(side=tk.LEFT)
+        tk.Label(
+            sc_title_row, text="⚡ Live Host Runtime Status", bg="#101522", fg="#ffffff", font=("Segoe UI", 10, "bold")
+        ).pack(side=tk.LEFT)
 
         status_text = "RUNNING" if self.is_server_running else "STOPPED"
         status_color = "#34d399" if self.is_server_running else "#f87171"
         status_bg = "#064e3b" if self.is_server_running else "#450a0a"
 
-        sc_status = tk.Label(sc_title_row, text=f" {status_text} ", bg=status_bg, fg=status_color, font=("Consolas", 8, "bold"), bd=1, relief="solid")
-        sc_status.pack(side=tk.RIGHT)
+        tk.Label(
+            sc_title_row,
+            text=f" {status_text} ",
+            bg=status_bg,
+            fg=status_color,
+            font=("Consolas", 8, "bold"),
+            bd=1,
+            relief="solid",
+        ).pack(side=tk.RIGHT)
 
-        metrics_box = tk.Frame(srv_card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1b2436", padx=10, pady=8)
+        metrics_box = tk.Frame(
+            srv_card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1b2436", padx=12, pady=10
+        )
         metrics_box.pack(fill=tk.X, pady=(0, 12))
 
-        m1 = tk.Label(metrics_box, text=f"Local Port:  {self.host_port} (TCP TLS 1.3)", bg="#080c14", fg="#94a3b8", font=("Consolas", 8))
-        m1.pack(anchor="w")
-        m2 = tk.Label(metrics_box, text=f"Host LAN IP: {self.local_ip}", bg="#080c14", fg="#94a3b8", font=("Consolas", 8))
-        m2.pack(anchor="w")
-        m3 = tk.Label(metrics_box, text="Tunnel Mode: LAN Direct (P2P)", bg="#080c14", fg="#94a3b8", font=("Consolas", 8))
-        m3.pack(anchor="w")
-        m4 = tk.Label(metrics_box, text="Clients:     1 Connected Mobile Device", bg="#080c14", fg="#34d399", font=("Consolas", 8))
-        m4.pack(anchor="w")
+        tk.Label(
+            metrics_box,
+            text=f"Host Endpoint:     http://{self.local_ip}:{self.host_port}",
+            bg="#080c14",
+            fg="#94a3b8",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
+        tk.Label(
+            metrics_box,
+            text=f"Active Workspace:  {self.active_workspace}",
+            bg="#080c14",
+            fg="#38bdf8",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
+        tk.Label(
+            metrics_box,
+            text=f"Commands Executed: {self.intents_processed}",
+            bg="#080c14",
+            fg="#34d399",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
 
-        srv_btn_text = "⏹ Stop Server" if self.is_server_running else "▶ Start Server"
+        srv_btn_text = "⏹ Stop Host Service" if self.is_server_running else "▶ Start Host Service"
         srv_btn_bg = "#b91c1c" if self.is_server_running else "#059669"
 
-        srv_toggle_btn = tk.Button(
+        tk.Button(
             srv_card,
             text=srv_btn_text,
             bg=srv_btn_bg,
@@ -736,55 +653,8 @@ class LazyTerminalCompanionApp:
             pady=6,
             bd=0,
             cursor="hand2",
-            command=self.handle_toggle_server
-        )
-        srv_toggle_btn.pack(fill=tk.X, side=tk.BOTTOM)
-
-        # --- RIGHT: Sync Manager Glass Card ---
-        sync_card = tk.Frame(dash_grid, bg="#101522", bd=1, relief="solid", highlightbackground="#1f2a3d", padx=14, pady=12)
-        sync_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-
-        sm_title_row = tk.Frame(sync_card, bg="#101522")
-        sm_title_row.pack(fill=tk.X, pady=(0, 8))
-
-        sm_title = tk.Label(sm_title_row, text="🔄 Sync Manager", bg="#101522", fg="#ffffff", font=("Segoe UI", 10, "bold"))
-        sm_title.pack(side=tk.LEFT)
-
-        sync_btn = tk.Button(
-            sm_title_row,
-            text="⚡ Request Sync" if not self.is_syncing else "Syncing...",
-            bg="#2563eb",
-            fg="#ffffff",
-            activebackground="#1d4ed8",
-            font=("Segoe UI", 8, "bold"),
-            bd=0,
-            padx=10,
-            pady=4,
-            cursor="hand2",
-            command=self.handle_sync_request,
-            state=tk.DISABLED if self.is_syncing else tk.NORMAL
-        )
-        sync_btn.pack(side=tk.RIGHT)
-
-        # Causal Sync Ledger List
-        list_container = tk.Frame(sync_card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1b2436")
-        list_container.pack(fill=tk.BOTH, expand=True)
-
-        for rec in self.sync_records:
-            item_frame = tk.Frame(list_container, bg="#0d121c", padx=8, pady=6, bd=1, relief="solid", highlightbackground="#182233")
-            item_frame.pack(fill=tk.X, padx=4, pady=3)
-
-            top_row = tk.Frame(item_frame, bg="#0d121c")
-            top_row.pack(fill=tk.X)
-
-            id_lbl = tk.Label(top_row, text=rec["id"], bg="#0d121c", fg="#38bdf8", font=("Consolas", 8, "bold"))
-            id_lbl.pack(side=tk.LEFT)
-
-            time_lbl = tk.Label(top_row, text=f"{rec['time_ago']} ({rec['timestamp']})", bg="#0d121c", fg="#64748b", font=("Segoe UI", 8))
-            time_lbl.pack(side=tk.RIGHT)
-
-            summary_lbl = tk.Label(item_frame, text=rec["summary"], bg="#0d121c", fg="#cbd5e1", font=("Segoe UI", 8), anchor="w")
-            summary_lbl.pack(fill=tk.X, pady=(2, 0))
+            command=self.handle_toggle_server,
+        ).pack(fill=tk.X, side=tk.BOTTOM)
 
     def show_toast(self, message: str):
         self.toast_message = message
@@ -800,7 +670,7 @@ class LazyTerminalCompanionApp:
     def handle_copy_token(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(self.pairing_token)
-        self.show_toast(f"Copied token {self.pairing_token} to clipboard!")
+        self.show_toast(f"Copied pairing code {self.pairing_token} to clipboard!")
 
     def handle_copy_host_url(self):
         url = f"http://{self.local_ip}:{self.host_port}"
@@ -809,45 +679,67 @@ class LazyTerminalCompanionApp:
         self.show_toast(f"Copied Host URL {url} to clipboard!")
 
     def handle_regenerate_token(self):
-        new_token = self.generate_random_token()
-        self.pairing_token = new_token
-        self.show_toast(f"Rotated pairing key: {self.pairing_token}")
+        try:
+            res = local_api_json(self.host_port, "/api/v1/pairing/generate", method="POST", payload={})
+            self.pairing_token = res.get("pairingKey") or self.pairing_token
+            self.show_toast(f"Rotated pairing key: {self.pairing_token}")
+        except Exception as err:
+            self.show_toast(f"Failed to rotate key: {err}")
 
     def handle_disconnect(self):
-        self.is_connected = False
-        self.show_toast("Mobile device disconnected. Waiting for connection.")
+        try:
+            local_api_json(
+                self.host_port, "/api/v1/host/daemon/control", method="POST", payload={"status": "restart"}
+            )
+            self.refresh_from_backend()
+            self.show_toast("Disconnected active session and rotated pairing code.")
+        except Exception as err:
+            self.show_toast(f"Failed to disconnect session: {err}")
 
     def handle_toggle_server(self):
-        self.is_server_running = not self.is_server_running
-        state_str = "started" if self.is_server_running else "stopped"
-        self.show_toast(f"Host server daemon {state_str}.")
-
-    def handle_sync_request(self):
-        self.is_syncing = True
-        self.build_ui()
-
-        def _do_sync():
-            time.sleep(0.7)
-            new_id = f"SYNC-REQ-{105 + len(self.sync_records) - 3}"
-            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-            new_record = {
-                "id": new_id,
-                "timestamp": now_str,
-                "time_ago": "Just now",
-                "items": random.randint(1, 4),
-                "summary": "Synchronized workspace state & causal graph intents across tunnel",
-                "head_commit": "3f7a8b1",
-            }
-            self.sync_records.insert(0, new_record)
-            self.is_syncing = False
-            self.root.after(0, lambda: self.show_toast(f"Sync request {new_id} completed successfully!"))
-
-        threading.Thread(target=_do_sync, daemon=True).start()
+        action = "stop" if self.is_server_running else "start"
+        try:
+            local_api_json(
+                self.host_port, "/api/v1/host/daemon/control", method="POST", payload={"status": action}
+            )
+            self.refresh_from_backend()
+            self.show_toast(f"Host companion service {action}ped.")
+        except Exception as err:
+            self.show_toast(f"Control error: {err}")
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Lazy Terminal Windows PC Companion")
+    parser.add_argument("--headless", action="store_true", help="Run without Tkinter desktop window")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("LAZY_TERMINAL_HOST_PORT", "3000")), help="Host port")
+    args = parser.parse_args()
+
+    backend = HostBackendProcessManager(preferred_port=args.port)
+    port = backend.start()
+
+    if args.headless or tk is None:
+        key_info = local_api_json(port, "/api/v1/pairing/key")
+        print(
+            f"[LazyTerminalCompanion] Headless mode active on http://0.0.0.0:{port} "
+            f"(LAN: http://{get_local_ip()}:{port}, Pairing Key: {key_info.get('pairingKey')})",
+            flush=True,
+        )
+        stop_event = threading.Event()
+
+        def _sig_handler(_signum, _frame):
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+        try:
+            while not stop_event.is_set():
+                time.sleep(0.5)
+        finally:
+            backend.stop()
+        return
+
     root = tk.Tk()
-    app = LazyTerminalCompanionApp(root)
+    LazyTerminalCompanionApp(root, backend)
     root.mainloop()
 
 

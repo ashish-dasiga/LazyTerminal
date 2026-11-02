@@ -14,12 +14,6 @@ export interface HostConfig {
   redactSecretsInLogs: boolean;
 }
 
-const FRONTEND_DEMO_PATHS = new Set([
-  path.normalize('C:\\Projects\\hyper-relay').toLowerCase(),
-  path.normalize('C:\\Dev\\ai-agents\\claude-fleet').toLowerCase(),
-  path.normalize('C:\\Work\\enterprise-dashboard').toLowerCase(),
-]);
-
 export function loadHostConfig(env: NodeJS.ProcessEnv = process.env): HostConfig {
   const defaultWorkspaceRoot = path.resolve(env.LAZY_TERMINAL_WORKSPACE_ROOT || process.cwd());
 
@@ -34,8 +28,8 @@ export function loadHostConfig(env: NodeJS.ProcessEnv = process.env): HostConfig
   );
 
   return {
-    hostPort: Number(env.LAZY_TERMINAL_HOST_PORT || env.HOST_PORT) || 9871,
-    hostBind: env.LAZY_TERMINAL_HOST_BIND || '127.0.0.1',
+    hostPort: Number(env.LAZY_TERMINAL_HOST_PORT || env.HOST_PORT || env.PORT) || 9871,
+    hostBind: env.LAZY_TERMINAL_HOST_BIND || '0.0.0.0',
     defaultWorkspaceRoot,
     allowedRoots,
     pairingTtlSeconds: Number(env.LAZY_TERMINAL_PAIRING_TTL_SECONDS) || 300,
@@ -45,6 +39,20 @@ export function loadHostConfig(env: NodeJS.ProcessEnv = process.env): HostConfig
     maxOutputBytes: Number(env.LAZY_TERMINAL_MAX_OUTPUT_BYTES) || 262_144,
     redactSecretsInLogs: env.LAZY_TERMINAL_REDACT_SECRETS !== 'false',
   };
+}
+
+export function authorizeWorkspaceRoot(targetRoot: string, config: HostConfig): string {
+  const resolved = path.resolve(targetRoot);
+  const exists = config.allowedRoots.some((r) =>
+    process.platform === 'win32'
+      ? path.resolve(r).toLowerCase() === resolved.toLowerCase()
+      : path.resolve(r) === resolved
+  );
+  if (!exists) {
+    config.allowedRoots.push(resolved);
+  }
+  config.defaultWorkspaceRoot = resolved;
+  return resolved;
 }
 
 export function isPathWithinAllowedRoots(targetPath: string, allowedRoots: string[]): boolean {
@@ -69,7 +77,7 @@ export function isPathWithinAllowedRoots(targetPath: string, allowedRoots: strin
 
 export type PathResolutionResult =
   | { ok: true; resolvedPath: string; mappedFromVirtual: boolean }
-  | { ok: false; code: 'PATH_NOT_ALLOWED'; error: string };
+  | { ok: false; code: 'PATH_NOT_ALLOWED' | 'DIRECTORY_NOT_FOUND'; error: string };
 
 export function resolveAuthorizedWorkingDir(
   requestedDir: string | undefined,
@@ -84,18 +92,6 @@ export function resolveAuthorizedWorkingDir(
   }
 
   const trimmed = requestedDir.trim();
-  const normalizedInput = path.normalize(trimmed).toLowerCase();
-
-  // Map supplied frontend's default showcase paths to the real local workspace root
-  // when those fictional directories do not exist on this PC.
-  if (FRONTEND_DEMO_PATHS.has(normalizedInput) && !fs.existsSync(trimmed)) {
-    return {
-      ok: true,
-      resolvedPath: config.defaultWorkspaceRoot,
-      mappedFromVirtual: true,
-    };
-  }
-
   const candidatePath = path.isAbsolute(trimmed)
     ? path.resolve(trimmed)
     : path.resolve(config.defaultWorkspaceRoot, trimmed);
@@ -111,8 +107,8 @@ export function resolveAuthorizedWorkingDir(
   if (!fs.existsSync(candidatePath) || !fs.statSync(candidatePath).isDirectory()) {
     return {
       ok: false,
-      code: 'PATH_NOT_ALLOWED',
-      error: `Requested working directory "${requestedDir}" does not exist or is not a directory.`,
+      code: 'DIRECTORY_NOT_FOUND',
+      error: `Requested working directory "${requestedDir}" does not exist or is not a directory on this Windows PC.`,
     };
   }
 

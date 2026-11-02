@@ -14,7 +14,7 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
   before(async () => {
     hostServer = await startHostCompanionServer(
       {
-        hostPort: 0, // bind to ephemeral available port for isolated testing
+        hostPort: 0,
         hostBind: '127.0.0.1',
         defaultWorkspaceRoot: process.cwd(),
         allowedRoots: [process.cwd()],
@@ -39,7 +39,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.match(keyInfo.pairingKey, /^\d{3}-\d{3}$/);
     assert.ok(keyInfo.expiresInSeconds > 0);
 
-    // Log a message containing a secret and verify redaction
     hostServer.companion.logger.info(`Test log with key ${keyInfo.pairingKey}`, {
       pairingKey: keyInfo.pairingKey,
       sessionToken: 'lt_sess_secret123',
@@ -50,12 +49,15 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.ok(!logs.includes('lt_sess_secret123'), 'Session token must never appear in logs');
   });
 
-  it('rejects unauthenticated requests to terminal and host status endpoints with 401', async () => {
+  it('rejects unauthenticated requests to terminal, filesystem, git, cli, and host status endpoints with 401', async () => {
     const endpoints = [
       { method: 'GET', path: '/api/v1/pty/sessions' },
       { method: 'POST', path: '/api/v1/pty/sessions/sess-pwsh/input', body: { command: 'whoami' } },
       { method: 'GET', path: '/api/v1/host/status' },
       { method: 'POST', path: '/api/v1/tunnel/disconnect' },
+      { method: 'GET', path: `/api/v1/fs/list?projectPath=${encodeURIComponent(process.cwd())}` },
+      { method: 'GET', path: `/api/v1/git/status?projectPath=${encodeURIComponent(process.cwd())}` },
+      { method: 'GET', path: '/api/v1/cli/tools' },
     ];
 
     for (const ep of endpoints) {
@@ -84,24 +86,20 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const initialKey = pm.getCurrentKeyEnvelope().pairingKey;
     assert.match(initialKey, /^\d{3}-\d{3}$/);
 
-    // 1. Invalid key attempts trigger rate limit after 3 failures
     assert.equal(pm.validatePairingKey({ pairingKey: '000-000' }).isValid, false);
     assert.equal(pm.validatePairingKey({ pairingKey: '000-001' }).isValid, false);
     const thirdFail = pm.validatePairingKey({ pairingKey: '000-002' });
     assert.equal(thirdFail.isValid, false);
     assert.match(thirdFail.errorMessage || '', /Too many failed pairing attempts/);
 
-    // Even valid key is blocked while locked out
     const blockedValid = pm.validatePairingKey({ pairingKey: initialKey });
     assert.equal(blockedValid.isValid, false);
 
-    // 2. Rotating key clears lockout and invalidates old key
     const rotated = pm.rotatePairingKey('test_rotate');
     assert.notEqual(rotated.pairingKey, initialKey);
     assert.equal(pm.validatePairingKey({ pairingKey: initialKey }).isValid, false);
     assert.equal(pm.validatePairingKey({ pairingKey: rotated.pairingKey }).isValid, true);
 
-    // 3. Advancing clock past TTL expires key
     fakeNow += 61_000;
     const expiredRes = pm.validatePairingKey({ pairingKey: rotated.pairingKey });
     assert.equal(expiredRes.isValid, false);
@@ -112,11 +110,9 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const adapter = new WindowsHostBackendAdapter(baseUrl);
     const keyEnvelope = await adapter.connection.fetchActiveHostKey();
 
-    // 1. Wrong key fails pairing
     const badConnect = await adapter.connection.connectToHost({ pairingKey: '000-000' });
     assert.equal(badConnect.success, false);
 
-    // 2. Valid key establishes authenticated session
     const goodConnect = await adapter.connection.connectToHost({
       pairingKey: keyEnvelope.pairingKey,
     });
@@ -124,7 +120,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.ok(goodConnect.sessionToken.startsWith('lt_sess_'));
     assert.equal(goodConnect.device.isOnline, true);
 
-    // 3. Execute harmless command and verify real output
     const exec1 = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Write-Output "LAZY_TERMINAL_REAL_HOST_OK"',
@@ -137,7 +132,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       `Expected real output, got: ${combinedOut1}`
     );
 
-    // 4. Verify persistent state (variable + working directory) across commands in same session
     await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: '$ltPersistVar = "PERSISTED_VALUE_99"; Set-Location src',
@@ -156,7 +150,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       combinedOut2.toLowerCase().includes(path.join(process.cwd(), 'src').toLowerCase())
     );
 
-    // Return to workspace root
     await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: `Set-Location -LiteralPath '${process.cwd().replace(/'/g, "''")}'`,
@@ -169,7 +162,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const keyEnvelope = await adapter.connection.fetchActiveHostKey();
     await adapter.connection.connectToHost({ pairingKey: keyEnvelope.pairingKey });
 
-    // 1. Unauthorized working directory outside workspace root
     const unauthorizedDirRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Write-Output "should-not-run"',
@@ -178,7 +170,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.equal(unauthorizedDirRes.exitCode, 126);
     assert.match(unauthorizedDirRes.lines[0]?.content || '', /outside authorized workspace roots/i);
 
-    // 2. Destructive command blocked by command guard
     const dangerousCmdRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Stop-Computer -Force',
@@ -187,7 +178,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.equal(dangerousCmdRes.exitCode, 126);
     assert.match(dangerousCmdRes.lines[0]?.content || '', /SECURITY GUARD/);
 
-    // 3. In-shell directory traversal outside allowed root is reverted
     const escapeRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Set-Location C:\\Windows',
@@ -206,7 +196,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const key1 = (await adapter.connection.fetchActiveHostKey()).pairingKey;
     await adapter.connection.connectToHost({ pairingKey: key1 });
 
-    // Start a slow command and cancel it via SIGINT
     const slowPromise = adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Start-Sleep -Seconds 8; Write-Output "FINISHED_SLOW"',
@@ -221,16 +210,13 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const slowText = slowRes.lines.map((l) => l.content).join('\n');
     assert.ok(!slowText.includes('FINISHED_SLOW'));
 
-    // Restarting daemon invalidates old pairing key and active session token
     await adapter.connection.setHostServerStatus('restart');
     const key2 = (await adapter.connection.fetchActiveHostKey()).pairingKey;
     assert.notEqual(key2, key1);
 
-    // Old key must be rejected after restart
     const oldKeyConnect = await adapter.connection.connectToHost({ pairingKey: key1 });
     assert.equal(oldKeyConnect.success, false);
 
-    // New key succeeds
     const newKeyConnect = await adapter.connection.connectToHost({ pairingKey: key2 });
     assert.equal(newKeyConnect.success, true);
   });

@@ -76,6 +76,9 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  isGitRepo?: boolean;
+  exists?: boolean;
+  accessible?: boolean;
   branch: string;
   isDirty: boolean;
   dirtyCount: number;
@@ -104,6 +107,10 @@ export interface AiCliTool {
   runCommand: string;
   permissionsRequired: string[];
   capabilities: string[];
+  executablePath?: string;
+  authStatus?: 'authenticated' | 'unauthenticated' | 'unknown' | 'not_installed';
+  authDetail?: string;
+  launchSupported?: boolean;
 }
 
 export interface DevServer {

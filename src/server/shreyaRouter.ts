@@ -42,6 +42,16 @@ shreyaRouter.get('/cli/check', async (req: Request, res: Response) => {
   }
 });
 
+shreyaRouter.get('/cli/status/:name', async (req: Request, res: Response) => {
+  try {
+    const name = String(req.params.name || '');
+    const status = await inspectCliStatus(name);
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 shreyaRouter.post('/cli/launch', async (req: Request, res: Response) => {
   try {
     const { toolId, workingDir, args, env } = req.body || {};
@@ -58,7 +68,7 @@ shreyaRouter.post('/cli/launch', async (req: Request, res: Response) => {
 
 shreyaRouter.post('/cli/install', async (req: Request, res: Response) => {
   try {
-    const { toolId } = req.body;
+    const { toolId } = req.body || {};
     if (!toolId) {
       res.status(400).json({ error: 'Body parameter "toolId" is required' });
       return;
@@ -84,9 +94,14 @@ shreyaRouter.get('/preview/servers', (_req: Request, res: Response) => {
   res.json(servers);
 });
 
+shreyaRouter.get('/preview/ports', (_req: Request, res: Response) => {
+  const servers = previewManager.listDevServers();
+  res.json({ ports: servers });
+});
+
 shreyaRouter.post('/preview/servers/start', async (req: Request, res: Response) => {
   try {
-    const { command, port, workingDir } = req.body;
+    const { command, port, workingDir } = req.body || {};
     if (!command || !port) {
       res.status(400).json({ error: 'Parameters "command" and "port" are required' });
       return;
@@ -100,7 +115,7 @@ shreyaRouter.post('/preview/servers/start', async (req: Request, res: Response) 
 
 shreyaRouter.post('/preview/servers/stop', async (req: Request, res: Response) => {
   try {
-    const { serverId } = req.body;
+    const { serverId } = req.body || {};
     if (!serverId) {
       res.status(400).json({ error: 'Parameter "serverId" is required' });
       return;
@@ -114,7 +129,7 @@ shreyaRouter.post('/preview/servers/stop', async (req: Request, res: Response) =
 
 shreyaRouter.post('/preview/python/run', async (req: Request, res: Response) => {
   try {
-    const { scriptPath } = req.body;
+    const { scriptPath } = req.body || {};
     if (!scriptPath) {
       res.status(400).json({ error: 'Parameter "scriptPath" is required' });
       return;
@@ -137,6 +152,11 @@ shreyaRouter.get('/preview/desktop-stream', (req: Request, res: Response) => {
   res.json(previewManager.getDesktopAppStream(appId));
 });
 
+shreyaRouter.get('/preview/desktop/:appId', (req: Request, res: Response) => {
+  const appId = String(req.params.appId || 'default-desktop-app');
+  res.json(previewManager.getDesktopAppStream(appId));
+});
+
 // ==========================================
 // 3. RUN / DEBUG TASK ENDPOINTS (S4)
 // ==========================================
@@ -149,7 +169,7 @@ shreyaRouter.get('/run-debug/detect', (req: Request, res: Response) => {
 
 shreyaRouter.post('/run-debug/start', (req: Request, res: Response) => {
   try {
-    const { taskId, command, args, workingDir } = req.body;
+    const { taskId, command, args, workingDir } = req.body || {};
     if (!taskId || !command) {
       res.status(400).json({ error: 'Parameters "taskId" and "command" are required' });
       return;
@@ -162,7 +182,7 @@ shreyaRouter.post('/run-debug/start', (req: Request, res: Response) => {
 });
 
 shreyaRouter.post('/run-debug/stop', (req: Request, res: Response) => {
-  const { taskId } = req.body;
+  const { taskId } = req.body || {};
   if (!taskId) {
     res.status(400).json({ error: 'Parameter "taskId" is required' });
     return;
