@@ -21,7 +21,8 @@
     "test:sync": "tsx tests/laptopSyncFlowPlaywright.test.ts",
     "test:pairing": "tsx tests/mobilePairingRedesignPlaywright.test.ts",
     "companion": "python lazy_terminal_companion.py",
-    "build:apk": "node scripts/build_android_apk.cjs"
+    "build:apk": "node scripts/build_android_apk.cjs",
+    "build:exe": "node scripts/build_windows_exe.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

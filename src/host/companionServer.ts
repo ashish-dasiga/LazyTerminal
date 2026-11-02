@@ -8,8 +8,8 @@ import 'dotenv/config';
 import { createHostCompanion, HostCompanionContext } from './router';
 import { HostConfig } from './config';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const currentFilePath = typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : (typeof __filename !== 'undefined' ? __filename : process.cwd());
+const currentDirPath = typeof __dirname !== 'undefined' ? __dirname : path.dirname(currentFilePath);
 
 export interface RunningHostServer {
   app: express.Express;
@@ -66,7 +66,7 @@ export async function startHostCompanionServer(
     });
   });
 
-  const distPath = path.resolve(__dirname, '../../dist');
+  const distPath = path.resolve(currentDirPath, '../../dist');
   if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
@@ -123,11 +123,16 @@ export async function startHostCompanionServer(
   });
 }
 
-// Run standalone when executed directly via `tsx src/host/companionServer.ts` or `npm run host`
+// Run standalone when executed directly via tsx, node, or standalone binary
 const isDirectRun =
-  process.argv[1] &&
-  (process.argv[1].endsWith('companionServer.ts') ||
-    process.argv[1].endsWith('companionServer.js'));
+  Boolean(
+    (process.argv[1] &&
+      (process.argv[1].endsWith('companionServer.ts') ||
+        process.argv[1].endsWith('companionServer.js') ||
+        process.argv[1].endsWith('companionServer.cjs') ||
+        process.argv[1].toLowerCase().endsWith('.exe'))) ||
+      (typeof require !== 'undefined' && require.main === module)
+  );
 
 if (isDirectRun) {
   startHostCompanionServer().catch((err) => {
