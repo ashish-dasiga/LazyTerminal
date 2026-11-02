@@ -7,6 +7,7 @@ import { TerminalSessionManager } from './terminalManager';
 import { fsRouter } from '../server/fsRoutes';
 import { gitRouter } from '../server/gitRoutes';
 import { shreyaRouter } from '../server/shreyaRouter';
+import { createWorkspaceRouter } from './workspaceRoutes';
 
 export interface HostCompanionContext {
   config: HostConfig;
@@ -445,13 +446,17 @@ export function createHostCompanion(
     }
   );
 
-  // 5. Authenticated Filesystem, Git, CLI, Run/Debug, and Preview Subsystems
-  // Attach host config onto request locals so FS & Git routers enforce dynamic workspace roots
+  // 5. Authenticated Workspace, Filesystem, Git, CLI, Run/Debug, and Preview Subsystems
+  const workspaceRouter = createWorkspaceRouter(config, {
+    persistState: !options?.silentLogger,
+  });
+
   const attachHostConfig = (_req: Request, res: Response, next: NextFunction) => {
     res.locals.hostConfig = config;
     next();
   };
 
+  router.use('/workspace', requireSessionAuth, attachHostConfig, workspaceRouter);
   router.use('/fs', requireSessionAuth, attachHostConfig, fsRouter);
   router.use('/git', requireSessionAuth, attachHostConfig, gitRouter);
   router.use('/', requireSessionAuth, attachHostConfig, shreyaRouter);

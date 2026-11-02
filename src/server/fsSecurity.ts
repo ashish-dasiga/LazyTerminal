@@ -1,43 +1,59 @@
 import path from 'path';
 import fs from 'fs';
 
-// Default allowed roots: the current working directory and any user-configured path
-export function getAllowedRoots(): string[] {
-  const roots: string[] = [path.resolve(process.cwd())];
-  const envRoot = process.env.LAZY_TERMINAL_WORKSPACE_ROOT || process.env.WORKSPACE_ROOT;
-  if (envRoot && fs.existsSync(envRoot)) {
-    roots.push(path.resolve(envRoot));
-  }
-  return roots;
+const dynamicAuthorizedRoots = new Set<string>();
+
+export function registerAuthorizedRoot(rootPath: string): string {
+  const resolved = path.resolve(rootPath);
+  dynamicAuthorizedRoots.add(resolved);
+  return resolved;
 }
 
-const DEMO_PROJECT_ROOTS = [
-  'c:/projects/hyper-relay',
-  'c:/dev/ai-agents/claude-fleet',
-  'c:/work/enterprise-dashboard',
-];
+export function clearDynamicAuthorizedRoots(): void {
+  dynamicAuthorizedRoots.clear();
+}
+
+// Default allowed roots: current working directory, env-configured root, plus dynamically selected workspaces
+export function getAllowedRoots(extraRoots?: string[]): string[] {
+  const roots = new Set<string>();
+  roots.add(path.resolve(process.cwd()));
+
+  const envRoot = process.env.LAZY_TERMINAL_WORKSPACE_ROOT || process.env.WORKSPACE_ROOT;
+  if (envRoot) {
+    roots.add(path.resolve(envRoot));
+  }
+
+  const configuredList = (process.env.LAZY_TERMINAL_ALLOWED_ROOTS || '')
+    .split(/[;,]/)
+    .map((r) => r.trim())
+    .filter(Boolean);
+  for (const r of configuredList) {
+    roots.add(path.resolve(r));
+  }
+
+  for (const dyn of dynamicAuthorizedRoots) {
+    roots.add(path.resolve(dyn));
+  }
+
+  if (Array.isArray(extraRoots)) {
+    for (const r of extraRoots) {
+      if (r && r.trim()) roots.add(path.resolve(r));
+    }
+  }
+
+  return Array.from(roots);
+}
 
 /**
- * Maps frontend placeholder project paths (from initial UI state) to the active host workspace root
- * when those placeholder directories do not exist on the host machine.
+ * Resolves a requested project path without silently substituting another folder
+ * when a requested path is missing or invalid.
  */
 export function resolveWorkspaceProjectPath(requestedPath?: string, defaultRoot?: string): string {
-  const root = defaultRoot || getAllowedRoots()[0];
+  const fallback = defaultRoot || getAllowedRoots()[0];
   if (!requestedPath || !requestedPath.trim() || requestedPath.trim() === '.') {
-    return root;
+    return fallback;
   }
-  const normalized = requestedPath.trim().replace(/\\/g, '/');
-  const lower = normalized.toLowerCase();
-  for (const demoRoot of DEMO_PROJECT_ROOTS) {
-    if (lower === demoRoot && !fs.existsSync(requestedPath)) {
-      return root;
-    }
-    if (lower.startsWith(demoRoot + '/') && !fs.existsSync(demoRoot)) {
-      const suffix = normalized.slice(demoRoot.length + 1);
-      return path.join(root, suffix);
-    }
-  }
-  return requestedPath;
+  return requestedPath.trim();
 }
 
 // Windows reserved device names to block
@@ -51,15 +67,26 @@ export interface PathValidationResult {
   errorCode?: 'PATH_NOT_ALLOWED' | 'INVALID_PATH' | 'PATH_TRAVERSAL_DETECTED';
 }
 
+function isSameOrSubPath(candidate: string, root: string): boolean {
+  const normCandidate =
+    process.platform === 'win32' ? path.resolve(candidate).toLowerCase() : path.resolve(candidate);
+  const normRoot =
+    process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root);
+
+  if (normCandidate === normRoot) return true;
+  const rootWithSep = normRoot.endsWith(path.sep) ? normRoot : normRoot + path.sep;
+  return normCandidate.startsWith(rootWithSep);
+}
+
 /**
  * Validates that a requested path strictly resides within at least one authorized workspace root.
  * Protects against directory traversal (../ and ..\), null byte injection, Windows reserved device names,
- * and symlink directory escapes.
+ * and symlink directory escapes. Never silently substitutes another directory.
  */
 export function validateSafePath(
   requestedPath: string,
   baseDir?: string,
-  customAllowedRoots?: string[]
+  customAllowedRoots?: string[],
 ): PathValidationResult {
   if (!requestedPath || typeof requestedPath !== 'string') {
     return {
@@ -70,8 +97,7 @@ export function validateSafePath(
     };
   }
 
-  // 1. Block null bytes
-  if (requestedPath.includes('\0')) {
+  if (requestedPath.includes('\0') || (baseDir && baseDir.includes('\0'))) {
     return {
       isValid: false,
       resolvedPath: '',
@@ -80,31 +106,30 @@ export function validateSafePath(
     };
   }
 
-  // 2. Normalize base directory and allowed roots
-  const allowedRoots = (customAllowedRoots && customAllowedRoots.length > 0)
-    ? customAllowedRoots.map((r) => path.resolve(r))
-    : getAllowedRoots();
+  const allowedRoots =
+    customAllowedRoots && customAllowedRoots.length > 0
+      ? customAllowedRoots.map((r) => path.resolve(r))
+      : getAllowedRoots();
 
   const effectiveBaseDir = baseDir
     ? resolveWorkspaceProjectPath(baseDir, allowedRoots[0])
     : allowedRoots[0];
   const primaryBase = path.resolve(effectiveBaseDir);
 
-  // 3. Map placeholder frontend root if applicable and normalize Windows backslashes
-  const effectiveRequestedPath = resolveWorkspaceProjectPath(requestedPath, primaryBase);
-  const normalizedSeparators = effectiveRequestedPath.replace(/\\/g, '/');
+  const normalizedSeparators = requestedPath.trim().replace(/\\/g, '/');
 
-  // 4. Resolve target path
   let resolved: string;
-  if (path.isAbsolute(normalizedSeparators)) {
+  if (path.isAbsolute(normalizedSeparators) || /^[a-zA-Z]:\//.test(normalizedSeparators)) {
     resolved = path.resolve(normalizedSeparators);
   } else {
     resolved = path.resolve(primaryBase, normalizedSeparators);
   }
 
-  // 5. Check for Windows reserved names in path components
+  // Check for Windows reserved names in non-drive path components
   const parts = resolved.split(path.sep);
-  for (const part of parts) {
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part || (i === 0 && /^[a-zA-Z]:$/.test(part))) continue;
     if (RESERVED_NAMES.test(part)) {
       return {
         isValid: false,
@@ -115,12 +140,7 @@ export function validateSafePath(
     }
   }
 
-  // 6. Ensure resolved path is under at least one allowed root
-  const matchedRoot = allowedRoots.find((root) => {
-    const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-    return resolved === root || resolved.startsWith(rootWithSep);
-  });
-
+  const matchedRoot = allowedRoots.find((root) => isSameOrSubPath(resolved, root));
   if (!matchedRoot) {
     return {
       isValid: false,
@@ -130,12 +150,12 @@ export function validateSafePath(
     };
   }
 
-  // 7. Check realpath if path exists to prevent symlink escape
+  // Check realpath if path exists to prevent symlink/junction escape
   try {
     if (fs.existsSync(resolved)) {
       const real = fs.realpathSync(resolved);
-      const rootWithSep = matchedRoot.endsWith(path.sep) ? matchedRoot : matchedRoot + path.sep;
-      if (real !== matchedRoot && !real.startsWith(rootWithSep)) {
+      const realRoot = fs.existsSync(matchedRoot) ? fs.realpathSync(matchedRoot) : matchedRoot;
+      if (!isSameOrSubPath(real, realRoot)) {
         return {
           isValid: false,
           resolvedPath: real,
@@ -145,7 +165,7 @@ export function validateSafePath(
       }
     }
   } catch {
-    // If realpath fails, fallback to strict resolved check
+    // Fallback to resolved lexical check if realpath fails
   }
 
   return {

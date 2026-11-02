@@ -22,6 +22,7 @@ export function NavigationDrawer() {
   const { 
     isDrawerOpen, 
     setIsDrawerOpen, 
+    setIsWorkspacePickerOpen,
     mobileNav, 
     setMobileNav, 
     activeProject, 
@@ -141,9 +142,17 @@ export function NavigationDrawer() {
             </div>
           </div>
 
-          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#20242d] text-zinc-300 border border-[#2d323e] shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setIsDrawerOpen(false);
+              setIsWorkspacePickerOpen(true);
+            }}
+            className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#20242d] hover:bg-[#282d39] text-zinc-300 border border-[#2d323e] shrink-0 cursor-pointer transition-colors"
+            title="Switch Windows PC Workspace Folder"
+          >
             {activeProject.name}
-          </span>
+          </button>
         </div>
 
         {/* Drawer Body */}
@@ -194,17 +203,16 @@ export function NavigationDrawer() {
             <button
               onClick={() => {
                 setIsDrawerOpen(false);
-                setActiveFile(null);
-                setMobileNav('explorer');
+                setIsWorkspacePickerOpen(true);
               }}
               className="w-full px-3 py-2 rounded-md flex items-center justify-between text-left hover:bg-[#1a1d24] text-zinc-300 hover:text-zinc-100 cursor-pointer text-xs transition-colors"
-              title="Browse directory folders in Explorer"
+              title="Select any folder on your Windows PC as the active workspace"
             >
               <div className="flex items-center gap-2.5">
                 <FolderOpen className="w-4 h-4 text-zinc-400" />
                 <span className="font-medium">Open Folder</span>
               </div>
-              <span className="text-[10px] text-zinc-500 font-mono">Browse root</span>
+              <span className="text-[10px] text-zinc-500 font-mono">Select PC folder</span>
             </button>
 
             {/* Action: New Folder */}

@@ -22,6 +22,9 @@ export * from './connectionMonitor';
  */
 function createAdapter(): IRelayBackendAdapter {
   const config = getAppConfig();
+  if (config.adapterMode === 'mock') {
+    return new MockRelayBackendAdapter();
+  }
   return new RealRelayBackendAdapter(config.hostBaseUrl);
 }
 

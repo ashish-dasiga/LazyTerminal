@@ -23,11 +23,11 @@ function AppContent() {
     setActiveFrontend, 
     connectionStep, 
     setIsDrawerOpen, 
+    isWorkspacePickerOpen,
+    setIsWorkspacePickerOpen,
     mobileNav,
     setReconciliationPromptOpen
   } = useRelay();
-
-  const [projectDrawerOpen, setProjectDrawerOpen] = useState(false);
 
   // Check URL query parameters for view overrides (e.g. ?view=mobile or ?view=laptop for E2E tests)
   useEffect(() => {
@@ -88,7 +88,7 @@ function AppContent() {
             <div className="w-full max-w-[430px] md:h-[860px] md:max-h-[96vh] h-[100dvh] bg-[#121419] md:rounded-2xl md:border border-[#272a33] shadow-xl flex flex-col overflow-hidden relative">
               {connectionStep === 'connected' && (
                 <DevicePresenceBar
-                  onOpenProjectDrawer={() => setProjectDrawerOpen(true)}
+                  onOpenProjectDrawer={() => setIsWorkspacePickerOpen(true)}
                   onOpenReconciliation={() => setReconciliationPromptOpen(true)}
                   onOpenDrawer={() => setIsDrawerOpen(true)}
                 />
@@ -104,9 +104,9 @@ function AppContent() {
 
               <ReconciliationModal />
               <ProjectSwitchDrawer
-                isOpen={projectDrawerOpen}
-                onClose={() => setProjectDrawerOpen(false)}
-                onManageWorkspaces={() => setProjectDrawerOpen(false)}
+                isOpen={isWorkspacePickerOpen}
+                onClose={() => setIsWorkspacePickerOpen(false)}
+                onManageWorkspaces={() => setIsWorkspacePickerOpen(false)}
               />
             </div>
           )}

@@ -44,13 +44,40 @@ export class HostUnreachableError extends ApiError {
 // Session token management (in-memory only — never persisted to disk)
 // ---------------------------------------------------------------------------
 
-let sessionToken: string | null = null;
+const SESSION_STORAGE_KEY = 'lazy_terminal_session_token';
+
+function readStoredSessionToken(): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      return window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage access errors in restricted WebViews
+  }
+  return null;
+}
+
+let sessionToken: string | null = readStoredSessionToken();
 
 export function setSessionToken(token: string | null): void {
   sessionToken = token;
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      if (token) {
+        window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+      } else {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
 }
 
 export function getSessionToken(): string | null {
+  if (!sessionToken) {
+    sessionToken = readStoredSessionToken();
+  }
   return sessionToken;
 }
 
