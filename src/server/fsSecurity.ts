@@ -67,11 +67,36 @@ export interface PathValidationResult {
   errorCode?: 'PATH_NOT_ALLOWED' | 'INVALID_PATH' | 'PATH_TRAVERSAL_DETECTED';
 }
 
+function canonicalizeExistingPrefix(p: string): string {
+  const abs = path.resolve(p);
+  try {
+    let curr = abs;
+    const tail: string[] = [];
+    while (!fs.existsSync(curr)) {
+      const parent = path.dirname(curr);
+      if (parent === curr) {
+        return abs;
+      }
+      tail.unshift(path.basename(curr));
+      curr = parent;
+    }
+    const realBase = fs.realpathSync.native
+      ? fs.realpathSync.native(curr)
+      : fs.realpathSync(curr);
+    return tail.length > 0 ? path.join(realBase, ...tail) : realBase;
+  } catch {
+    // Fallback to resolved path
+  }
+  return abs;
+}
+
 function isSameOrSubPath(candidate: string, root: string): boolean {
+  const realCandidate = canonicalizeExistingPrefix(candidate);
+  const realRoot = canonicalizeExistingPrefix(root);
   const normCandidate =
-    process.platform === 'win32' ? path.resolve(candidate).toLowerCase() : path.resolve(candidate);
+    process.platform === 'win32' ? realCandidate.toLowerCase() : realCandidate;
   const normRoot =
-    process.platform === 'win32' ? path.resolve(root).toLowerCase() : path.resolve(root);
+    process.platform === 'win32' ? realRoot.toLowerCase() : realRoot;
 
   if (normCandidate === normRoot) return true;
   const rootWithSep = normRoot.endsWith(path.sep) ? normRoot : normRoot + path.sep;

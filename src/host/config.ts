@@ -41,12 +41,35 @@ export function loadHostConfig(env: NodeJS.ProcessEnv = process.env): HostConfig
   };
 }
 
+function resolveCanonicalPath(targetPath: string): string {
+  const abs = path.resolve(targetPath);
+  try {
+    let curr = abs;
+    const tail: string[] = [];
+    while (!fs.existsSync(curr)) {
+      const parent = path.dirname(curr);
+      if (parent === curr) {
+        return abs;
+      }
+      tail.unshift(path.basename(curr));
+      curr = parent;
+    }
+    const realBase = fs.realpathSync.native
+      ? fs.realpathSync.native(curr)
+      : fs.realpathSync(curr);
+    return tail.length > 0 ? path.join(realBase, ...tail) : realBase;
+  } catch {
+    // Fallback to path.resolve if realpath cannot be read
+  }
+  return abs;
+}
+
 export function authorizeWorkspaceRoot(targetRoot: string, config: HostConfig): string {
-  const resolved = path.resolve(targetRoot);
+  const resolved = resolveCanonicalPath(targetRoot);
   const exists = config.allowedRoots.some((r) =>
     process.platform === 'win32'
-      ? path.resolve(r).toLowerCase() === resolved.toLowerCase()
-      : path.resolve(r) === resolved
+      ? resolveCanonicalPath(r).toLowerCase() === resolved.toLowerCase()
+      : resolveCanonicalPath(r) === resolved
   );
   if (!exists) {
     config.allowedRoots.push(resolved);
@@ -56,12 +79,12 @@ export function authorizeWorkspaceRoot(targetRoot: string, config: HostConfig): 
 }
 
 export function isPathWithinAllowedRoots(targetPath: string, allowedRoots: string[]): boolean {
-  const resolvedTarget = path.resolve(targetPath);
+  const resolvedTarget = resolveCanonicalPath(targetPath);
   const normalizedTarget =
     process.platform === 'win32' ? resolvedTarget.toLowerCase() : resolvedTarget;
 
   return allowedRoots.some((root) => {
-    const resolvedRoot = path.resolve(root);
+    const resolvedRoot = resolveCanonicalPath(root);
     const normalizedRoot =
       process.platform === 'win32' ? resolvedRoot.toLowerCase() : resolvedRoot;
 
@@ -114,7 +137,7 @@ export function resolveAuthorizedWorkingDir(
 
   return {
     ok: true,
-    resolvedPath: candidatePath,
+    resolvedPath: resolveCanonicalPath(candidatePath),
     mappedFromVirtual: false,
   };
 }

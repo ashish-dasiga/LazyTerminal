@@ -1,5 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { startHostCompanionServer, RunningHostServer } from '../companionServer';
 import { WindowsHostBackendAdapter } from '../../services/hostClientAdapter';
@@ -11,13 +13,17 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
   let hostServer: RunningHostServer;
   let baseUrl: string;
 
+  let tempTestRoot: string;
+
   before(async () => {
+    const rawTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-pwsh-suite-'));
+    tempTestRoot = fs.realpathSync.native ? fs.realpathSync.native(rawTmp) : fs.realpathSync(rawTmp);
     hostServer = await startHostCompanionServer(
       {
         hostPort: 0,
         hostBind: '127.0.0.1',
         defaultWorkspaceRoot: process.cwd(),
-        allowedRoots: [process.cwd()],
+        allowedRoots: [process.cwd(), tempTestRoot],
         pairingTtlSeconds: 300,
         pairingMaxAttempts: 4,
         pairingLockoutMs: 10_000,
@@ -31,6 +37,9 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
   after(async () => {
     if (hostServer) {
       await hostServer.close();
+    }
+    if (tempTestRoot && fs.existsSync(tempTestRoot)) {
+      fs.rmSync(tempTestRoot, { recursive: true, force: true });
     }
   });
 
@@ -272,5 +281,123 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       sseEvents.join('').includes('SSE_STREAM_TEST_OK'),
       'Expected SSE stream to receive real-time terminal output line'
     );
+  });
+
+  it('supports full persistent Windows PowerShell lifecycle: spaces, Unicode, standard commands, errors, multi-session isolation, and cleanup', async () => {
+    const adapter = new WindowsHostBackendAdapter(baseUrl);
+    const keyEnvelope = await adapter.connection.fetchActiveHostKey();
+    await adapter.connection.connectToHost({ pairingKey: keyEnvelope.pairingKey });
+
+    // Create two independent PowerShell sessions in tempTestRoot
+    const sessA = await adapter.terminal.createSession({
+      title: 'PWSH Isolation A',
+      type: 'powershell',
+      workingDir: tempTestRoot,
+    });
+    const sessB = await adapter.terminal.createSession({
+      title: 'PWSH Isolation B',
+      type: 'powershell',
+      workingDir: tempTestRoot,
+    });
+    assert.notEqual(sessA.id, sessB.id);
+
+    // 1. Standard PowerShell commands: whoami, pwd, Get-Location, mkdir with spaces, cd, New-Item Unicode, Get-Content, ls, dir, Get-ChildItem
+    const whoamiRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'whoami',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(whoamiRes.exitCode, 0);
+    assert.ok(whoamiRes.lines.some((l) => l.content.includes('\\') || l.content.trim().length > 0));
+
+    const mkRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'mkdir "Sub Folder With Spaces" | Out-Null; cd "Sub Folder With Spaces"; pwd',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(mkRes.exitCode, 0);
+    const expectedSubDir = path.join(tempTestRoot, 'Sub Folder With Spaces');
+    assert.equal(mkRes.workingDir?.toLowerCase(), expectedSubDir.toLowerCase());
+    assert.ok(fs.existsSync(expectedSubDir));
+
+    const unicodeCmd =
+      'New-Item -Path "üñîçødé notes.txt" -ItemType File -Force | Out-Null; Set-Content -LiteralPath "üñîçødé notes.txt" -Value "Hello Windows PowerShell 🚀" -NoNewline; Get-Content -LiteralPath "üñîçødé notes.txt"';
+    const fileRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: unicodeCmd,
+      workingDir: expectedSubDir,
+    });
+    assert.equal(fileRes.exitCode, 0);
+    assert.ok(
+      fileRes.lines.map((l) => l.content).join('\n').includes('Hello Windows PowerShell 🚀'),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(expectedSubDir, 'üñîçødé notes.txt'), 'utf8').replace(/^\uFEFF/, ''),
+      'Hello Windows PowerShell 🚀',
+    );
+
+    for (const listCmd of ['ls', 'dir', 'Get-ChildItem']) {
+      const lsRes = await adapter.terminal.executeCommand({
+        sessionId: sessA.id,
+        command: listCmd,
+        workingDir: expectedSubDir,
+      });
+      assert.equal(lsRes.exitCode, 0);
+      assert.ok(
+        lsRes.lines.map((l) => l.content).join('\n').includes('üñîçødé notes.txt'),
+        `${listCmd} should list created Unicode file`,
+      );
+    }
+
+    // 2. Session A sets variable; verify Session B is completely isolated (different cwd & no variable bleed)
+    await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: '$isolatedSecret = "SESSION_A_ONLY"',
+      workingDir: expectedSubDir,
+    });
+
+    const checkB = await adapter.terminal.executeCommand({
+      sessionId: sessB.id,
+      command: 'Write-Output "VAR=$($isolatedSecret)|CWD=$((Get-Location).Path)"',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(checkB.exitCode, 0);
+    const outB = checkB.lines.map((l) => l.content).join('\n');
+    assert.ok(outB.includes('VAR=|'), `Session B must not see Session A variable, got: ${outB}`);
+    assert.ok(outB.toLowerCase().includes(tempTestRoot.toLowerCase()));
+    assert.ok(!outB.toLowerCase().includes('sub folder with spaces'));
+
+    // 3. Non-zero exit codes & syntax errors recover cleanly without breaking persistent state
+    const exitCodeRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'cmd /c "exit 9"',
+      workingDir: expectedSubDir,
+    });
+    assert.equal(exitCodeRes.exitCode, 9);
+
+    const syntaxErrRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'if (',
+      workingDir: expectedSubDir,
+    });
+    assert.notEqual(syntaxErrRes.exitCode, 0);
+    assert.ok(syntaxErrRes.lines.some((l) => l.type === 'error'));
+
+    // Verify Session A still remembers $isolatedSecret and its workingDir after errors + cd ..
+    const recoverRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'cd ..; echo "$isolatedSecret|$((Get-Location).Path)"',
+      workingDir: expectedSubDir,
+    });
+    assert.equal(recoverRes.exitCode, 0);
+    const recoverText = recoverRes.lines.map((l) => l.content).join('\n');
+    assert.ok(recoverText.includes('SESSION_A_ONLY'));
+    assert.equal(recoverRes.workingDir?.toLowerCase(), tempTestRoot.toLowerCase());
+
+    // 4. Close both sessions and verify cleanup
+    await adapter.terminal.closeSession(sessA.id);
+    await adapter.terminal.closeSession(sessB.id);
+    const remaining = await adapter.terminal.listSessions();
+    assert.ok(!remaining.some((s) => s.id === sessA.id || s.id === sessB.id));
   });
 });

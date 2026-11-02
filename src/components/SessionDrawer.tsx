@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { useRelay } from '../context/RelayContext';
-import { 
-  Terminal, 
-  Sparkles, 
-  Cpu, 
-  Flame, 
-  ChevronDown, 
-  X, 
+import {
+  Terminal,
+  Sparkles,
+  Cpu,
+  Flame,
+  ChevronDown,
+  X,
   Check,
   Search,
   Lock,
@@ -14,7 +14,8 @@ import {
   SlidersHorizontal,
   Trash2,
   Bot,
-  Boxes
+  Boxes,
+  Plus,
 } from 'lucide-react';
 import { TerminalSession } from '../types/relay';
 
@@ -65,7 +66,6 @@ export function SessionDrawer({
     }
   };
 
-  // Resolve tool availability based on real state from cliTools context
   const claudeTool = cliTools.find((t) => t.id === 'claude');
   const codexTool = cliTools.find((t) => t.id === 'codex');
   const geminiTool = cliTools.find((t) => t.id === 'gemini');
@@ -73,15 +73,24 @@ export function SessionDrawer({
 
   const getToolStatusBadge = (tool?: typeof claudeTool) => {
     if (!tool) {
-      return { status: 'Unavailable', badgeClass: 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50' };
+      return {
+        status: 'Unavailable',
+        badgeClass: 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50',
+      };
     }
     if (tool.status === 'installed' || tool.status === 'running') {
       return { status: 'Installed', badgeClass: 'bg-zinc-800 text-zinc-300' };
     }
     if (tool.status === 'needs_setup') {
-      return { status: 'Needs Setup', badgeClass: 'bg-amber-950/60 text-amber-300 border border-amber-800/40' };
+      return {
+        status: 'Needs Auth',
+        badgeClass: 'bg-amber-950/60 text-amber-300 border border-amber-800/40',
+      };
     }
-    return { status: 'Unavailable', badgeClass: 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50' };
+    return {
+      status: 'Unavailable',
+      badgeClass: 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50',
+    };
   };
 
   const claudeStatus = getToolStatusBadge(claudeTool);
@@ -89,16 +98,18 @@ export function SessionDrawer({
   const geminiStatus = getToolStatusBadge(geminiTool);
   const antigravityStatus = getToolStatusBadge(antigravityTool);
 
-  const isDevServerRunning = devServers.some((s) => s.status === 'active');
+  const pwshSessionsCount = sessions.filter((s) => s.type === 'powershell').length;
+  const primaryPwshTitle =
+    sessions.find((s) => s.type === 'powershell')?.title || 'Windows PowerShell';
+  const hasBashSession = sessions.some((s) => s.type === 'bash');
 
-  // Group 1: Shells (3 options)
   const shellOptions = [
     {
       id: 'powershell',
-      title: 'PowerShell 7.4',
+      title: primaryPwshTitle,
       type: 'powershell' as const,
-      subtitle: 'Native Windows ConPTY host shell',
-      status: 'Installed',
+      subtitle: 'Persistent Windows PowerShell host session',
+      status: 'Ready',
       badgeClass: 'bg-zinc-800 text-zinc-300',
       icon: <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
@@ -107,75 +118,79 @@ export function SessionDrawer({
       title: 'Command Prompt (CMD)',
       type: 'cmd' as const,
       subtitle: 'Windows cmd.exe environment',
-      status: 'Installed',
+      status: 'Ready',
       badgeClass: 'bg-zinc-800 text-zinc-300',
       icon: <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
-    {
-      id: 'bash',
-      title: 'Bash (WSL)',
-      type: 'bash' as const,
-      subtitle: 'Git Bash / WSL environment',
-      status: 'Installed',
-      badgeClass: 'bg-zinc-800 text-zinc-300',
-      icon: <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-    },
+    ...(hasBashSession
+      ? [
+          {
+            id: 'bash',
+            title: 'Bash (WSL / Git Bash)',
+            type: 'bash' as const,
+            subtitle: 'Detected bash.exe on Windows PATH',
+            status: 'Ready',
+            badgeClass: 'bg-zinc-800 text-zinc-300',
+            icon: <Terminal className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+          },
+        ]
+      : []),
   ];
 
-  // Group 2: AI Coding Tools (All 4 entries: Claude Code, Codex CLI, Gemini CLI, Antigravity)
   const aiCodingToolOptions = [
     {
       id: 'claude',
       title: 'Claude Code',
       type: 'claude' as const,
-      subtitle: `Anthropic CLI agent · ${claudeTool?.version || 'v1.0.8'}`,
+      subtitle: `Anthropic CLI · ${claudeTool?.version || 'Not detected'}`,
       status: claudeStatus.status,
       badgeClass: claudeStatus.badgeClass,
       icon: <Sparkles className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
     {
-      id: 'codex',
-      title: 'Codex CLI',
-      type: 'codex' as const,
-      subtitle: `OpenAI code synthesizer · ${codexTool?.version || 'v0.9.4'}`,
-      status: codexStatus.status,
-      badgeClass: codexStatus.badgeClass,
-      icon: <Cpu className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-    },
-    {
       id: 'gemini',
       title: 'Gemini CLI',
       type: 'gemini' as const,
-      subtitle: `Google developer CLI · ${geminiTool?.version || 'v2.5.0'}`,
+      subtitle: `Google CLI · ${geminiTool?.version || 'Not detected'}`,
       status: geminiStatus.status,
       badgeClass: geminiStatus.badgeClass,
       icon: <Bot className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
     {
+      id: 'codex',
+      title: 'Codex CLI',
+      type: 'codex' as const,
+      subtitle: `OpenAI CLI · ${codexTool?.version || 'Not detected'}`,
+      status: codexStatus.status,
+      badgeClass: codexStatus.badgeClass,
+      icon: <Cpu className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+    },
+    {
       id: 'antigravity',
       title: 'Antigravity',
       type: 'antigravity' as const,
-      subtitle: 'Agent runtime · Host bridge active',
+      subtitle: `Agent CLI · ${antigravityTool?.version || 'Not detected'}`,
       status: antigravityStatus.status,
       badgeClass: antigravityStatus.badgeClass,
       icon: <Boxes className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
   ];
 
-  // Group 3: Development Sessions (1 option)
   const devSessionOptions = [
     {
       id: 'build',
-      title: 'Dev Server Watcher',
+      title: 'Dev Server Shell',
       type: 'build' as const,
-      subtitle: 'npm run dev · Vite 5.4 watcher',
+      subtitle:
+        devServers.length > 0
+          ? `${devServers.length} active server(s) on host`
+          : 'Dedicated shell for build / dev commands',
       status: '',
       badgeClass: '',
       icon: <Flame className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
     },
   ];
 
-  // Selection handler: Switches to existing session in context or creates it
   const handleSelectOption = (title: string, type: TerminalSession['type']) => {
     const existing = sessions.find((s) => s.type === type);
     if (existing) {
@@ -183,6 +198,11 @@ export function SessionDrawer({
     } else {
       createSession(title, type);
     }
+    setIsMenuOpen(false);
+  };
+
+  const handleNewPowerShellSession = () => {
+    createSession(`${primaryPwshTitle} #${pwshSessionsCount + 1}`, 'powershell');
     setIsMenuOpen(false);
   };
 
@@ -196,11 +216,14 @@ export function SessionDrawer({
     icon: React.ReactNode;
   }) => {
     const existingSession = sessions.find((s) => s.type === opt.type);
-    const isActive = existingSession ? existingSession.id === activeSessionId : activeSession.type === opt.type;
+    const isActive = existingSession
+      ? existingSession.id === activeSessionId
+      : activeSession.type === opt.type;
 
     return (
       <div
         key={opt.id}
+        data-testid={`session-option-${opt.id}`}
         onClick={() => handleSelectOption(opt.title, opt.type)}
         className={`flex items-center justify-between px-2.5 py-1.5 rounded transition-colors cursor-pointer ${
           isActive
@@ -225,37 +248,28 @@ export function SessionDrawer({
             </span>
           ) : null}
           {isActive && <Check className="w-3.5 h-3.5 text-blue-400" />}
-          {existingSession && sessions.length > 1 && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                closeSession(existingSession.id);
-              }}
-              className="p-1 text-zinc-500 hover:text-rose-400 rounded transition-colors"
-              title="Close session"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          )}
         </div>
       </div>
     );
   };
 
   return (
-    <div className={`bg-[#15171d] border-b border-[#252831] px-3 py-1.5 flex items-center justify-between text-xs font-mono select-none shrink-0 ${
-      isMenuOpen ? 'z-50' : 'z-20'
-    }`}>
+    <div
+      className={`bg-[#15171d] border-b border-[#252831] px-3 py-1.5 flex items-center justify-between text-xs font-mono select-none shrink-0 ${
+        isMenuOpen ? 'z-50' : 'z-20'
+      }`}
+    >
       {/* Left: Compact Session Switcher */}
       <div className="relative flex items-center gap-1.5">
         <button
           onClick={() => setIsMenuOpen(!isMenuOpen)}
+          data-testid="session-switcher-btn"
           className="group flex items-center gap-1.5 px-2 py-1 bg-[#1c1f26] hover:bg-[#232731] active:bg-[#282d38] border border-[#2b303b] hover:border-[#383d4a] rounded transition-colors text-zinc-300 hover:text-white cursor-pointer text-xs"
           title="Switch shell session"
         >
           <span className="text-[11px] text-zinc-500 font-sans">session:</span>
           {getSessionIcon(activeSession.type)}
-          <span className="font-medium text-zinc-200 truncate max-w-[130px]">
+          <span className="font-medium text-zinc-200 truncate max-w-[140px]">
             {activeSession.title}
           </span>
           <ChevronDown
@@ -265,35 +279,98 @@ export function SessionDrawer({
           />
         </button>
 
-        {/* Dropdown Menu for Sessions: Properly constrained height, self-contained vertical scroll, no clipping */}
         {isMenuOpen && (
           <>
-            <div 
-              className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[1px]" 
-              onClick={() => setIsMenuOpen(false)} 
+            <div
+              className="fixed inset-0 z-40 bg-black/25 backdrop-blur-[1px]"
+              onClick={() => setIsMenuOpen(false)}
             />
-            <div 
-              className="absolute top-9 left-0 z-50 w-[305px] max-w-[calc(100vw-24px)] max-h-[260px] sm:max-h-[290px] overflow-y-auto overscroll-contain bg-[#191c23] border border-[#2b303b] rounded-lg shadow-2xl p-1.5 text-xs font-mono space-y-2 animate-in fade-in duration-100"
+            <div
+              className="absolute top-9 left-0 z-50 w-[315px] max-w-[calc(100vw-24px)] max-h-[310px] overflow-y-auto overscroll-contain bg-[#191c23] border border-[#2b303b] rounded-lg shadow-2xl p-1.5 text-xs font-mono space-y-2 animate-in fade-in duration-100"
               style={{
                 scrollbarWidth: 'thin',
                 scrollbarColor: '#3f3f46 #18181b',
               }}
             >
-              {/* Header */}
+              {/* Header with + New Shell action */}
               <div className="px-2 py-1 text-[10px] text-zinc-400 uppercase tracking-wider font-semibold border-b border-[#242832] flex items-center justify-between sticky top-0 bg-[#191c23] z-10 -mt-1.5 -mx-1.5 p-1.5 rounded-t-lg">
-                <span>Terminal Sessions</span>
-                <span className="text-[10px] text-zinc-500 font-normal">{sessions.length} sessions</span>
+                <span>Terminal Sessions ({sessions.length})</span>
+                <button
+                  type="button"
+                  onClick={handleNewPowerShellSession}
+                  data-testid="new-powershell-session-btn"
+                  className="px-1.5 py-0.5 bg-[#222631] hover:bg-[#2b3140] text-zinc-200 border border-[#343a49] rounded text-[10px] normal-case font-mono flex items-center gap-1 cursor-pointer transition-colors"
+                  title="Create a new isolated PowerShell session"
+                >
+                  <Plus className="w-2.5 h-2.5 text-blue-400" />
+                  <span>New Shell</span>
+                </button>
               </div>
 
+              {/* Active Host Sessions List (supports multi-session switching & closing) */}
+              {sessions.length > 0 && (
+                <div className="space-y-0.5">
+                  <div className="px-2 py-0.5 text-[10px] text-zinc-400 uppercase font-semibold tracking-wider">
+                    Active Host Sessions
+                  </div>
+                  {sessions.map((sess) => {
+                    const isSelected = sess.id === activeSessionId;
+                    return (
+                      <div
+                        key={sess.id}
+                        data-testid={`active-session-row-${sess.id}`}
+                        onClick={() => {
+                          setActiveSessionId(sess.id);
+                          setIsMenuOpen(false);
+                        }}
+                        className={`flex items-center justify-between px-2.5 py-1.5 rounded transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'bg-[#242833] text-white font-medium'
+                            : 'text-zinc-300 hover:bg-[#1f222b]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 mr-2">
+                          {getSessionIcon(sess.type)}
+                          <div className="truncate">
+                            <div className="truncate text-xs font-mono">{sess.title}</div>
+                            {sess.workingDir && (
+                              <div className="text-[10px] text-zinc-500 font-mono truncate">
+                                {sess.workingDir}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          {isSelected && <Check className="w-3.5 h-3.5 text-blue-400" />}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              closeSession(sess.id);
+                            }}
+                            data-testid={`close-session-${sess.id}`}
+                            className="p-1 text-zinc-500 hover:text-rose-400 rounded transition-colors cursor-pointer"
+                            title="Close host session"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Group 1: Shells */}
-              <div className="space-y-0.5">
+              <div className="pt-1.5 border-t border-[#242832] space-y-0.5">
                 <div className="px-2 py-0.5 text-[10px] text-zinc-400 uppercase font-semibold tracking-wider">
                   Shells
                 </div>
                 {shellOptions.map(renderOptionRow)}
               </div>
 
-              {/* Group 2: AI Coding Tools (Claude Code, Codex CLI, Gemini CLI, Antigravity) */}
+              {/* Group 2: AI Coding Tools */}
               <div className="pt-1.5 border-t border-[#242832] space-y-0.5">
                 <div className="px-2 py-0.5 text-[10px] text-zinc-400 uppercase font-semibold tracking-wider">
                   AI Coding Tools
@@ -315,7 +392,6 @@ export function SessionDrawer({
 
       {/* Right: Minimal Terminal Utilities */}
       <div className="flex items-center gap-1">
-        {/* Search */}
         <button
           onClick={() => setShowSearch(!showSearch)}
           className={`p-1 rounded transition-colors cursor-pointer ${
@@ -328,7 +404,6 @@ export function SessionDrawer({
           <Search className="w-3.5 h-3.5" />
         </button>
 
-        {/* Auto Scroll Lock */}
         <button
           onClick={() => setAutoScrollLocked(!autoScrollLocked)}
           className={`p-1 rounded transition-colors cursor-pointer ${
@@ -341,7 +416,6 @@ export function SessionDrawer({
           {autoScrollLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
         </button>
 
-        {/* More Options Popover */}
         <div className="relative">
           <button
             onClick={() => setIsOptionsOpen(!isOptionsOpen)}
