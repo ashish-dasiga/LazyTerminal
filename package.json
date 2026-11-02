@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test:host": "node --import tsx --test src/host/__tests__/hostCompanion.test.ts",
+    "test:host": "node --import tsx --test src/host/__tests__/hostCompanion.test.ts src/host/__tests__/aiProviders.test.ts",
     "test:shreya": "node --import tsx --test tests/cliDetector.test.ts tests/runDebug.test.ts tests/preview.test.ts",
     "test:deeksha": "node --import tsx --test src/tests/*.test.ts",
     "test": "tsx tests/fsGit.test.ts && tsx tests/hostApi.test.ts && node --import tsx --test src/tests/*.test.ts",

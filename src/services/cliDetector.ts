@@ -4,6 +4,10 @@ import path from 'path';
 import fs from 'fs';
 import { AiCliTool } from '../types/relay';
 import { CliStatusResponse, InstallToolResponse } from './contracts';
+import {
+  inspectProviderAuth,
+  resolveWindowsExecutableSpawn,
+} from '../host/aiProviders';
 
 const execFileAsync = promisify(execFile);
 
@@ -48,7 +52,14 @@ export interface CliLaunchRequest {
 export interface CliLaunchResponse {
   toolId: string;
   launched: boolean;
-  status: 'running' | 'completed' | 'requires_auth' | 'requires_pty' | 'unsupported' | 'not_installed' | 'error';
+  status:
+    | 'running'
+    | 'completed'
+    | 'requires_auth'
+    | 'requires_pty'
+    | 'unsupported'
+    | 'not_installed'
+    | 'error';
   executablePath?: string;
   workingDir: string;
   version?: string;
@@ -63,14 +74,23 @@ export const SUPPORTED_CLI_DEFINITIONS: CliMetadataConfig[] = [
     name: 'Claude Code',
     cliName: 'claude',
     binaryCandidates: ['claude.exe', 'claude.cmd', 'claude'],
-    description: 'Anthropic agentic CLI for full-codebase navigation, editing, and tool execution on Windows PC.',
+    description:
+      'Anthropic agentic CLI for full-codebase navigation, editing, and tool execution on Windows PC.',
     vendor: 'Anthropic PBC',
     versionArgs: ['--version'],
     installCommand: 'npm install -g @anthropic-ai/claude-code',
-    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
+    installScope: 'Global Windows Node.js / ~/.local/bin',
     runCommand: 'claude',
-    permissionsRequired: ['Native Shell Execution', 'File System Read/Write', 'Child Process Spawning'],
-    capabilities: ['Sub-agent delegation', 'Diff inspections', 'Curses interactive UI', 'AST refactoring'],
+    permissionsRequired: [
+      'Native Shell Execution',
+      'File System Read/Write',
+      'Child Process Spawning',
+    ],
+    capabilities: [
+      'Multi-turn session (--resume)',
+      'Structured JSON streaming',
+      'Workspace tool execution',
+    ],
     authEnvVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
   },
   {
@@ -85,7 +105,7 @@ export const SUPPORTED_CLI_DEFINITIONS: CliMetadataConfig[] = [
     installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
     runCommand: 'codex',
     permissionsRequired: ['Native Shell Execution', 'File System Read'],
-    capabilities: ['Code synthesis', 'Refactoring suggestions', 'Inline bug detection'],
+    capabilities: ['Non-interactive exec', 'Session resume', 'Workspace code synthesis'],
     authEnvVars: ['OPENAI_API_KEY'],
   },
   {
@@ -93,14 +113,15 @@ export const SUPPORTED_CLI_DEFINITIONS: CliMetadataConfig[] = [
     name: 'Gemini CLI',
     cliName: 'gemini',
     binaryCandidates: ['gemini.exe', 'gemini.cmd', 'gemini'],
-    description: 'Developer multi-turn workspace reasoning CLI with grounding in your local repo.',
+    description:
+      'Developer multi-turn workspace reasoning CLI with grounding in your local repo.',
     vendor: 'Google LLC',
     versionArgs: ['--version'],
     installCommand: 'npm install -g @google/gemini-cli',
     installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
     runCommand: 'gemini',
     permissionsRequired: ['Native Shell Execution', 'File System Read/Write'],
-    capabilities: ['Code reasoning', 'Semantic repo search', 'Multimodal context'],
+    capabilities: ['Multi-turn session (--resume)', 'Structured JSON streaming', 'Repo search'],
     authEnvVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
   },
   {
@@ -115,14 +136,16 @@ export const SUPPORTED_CLI_DEFINITIONS: CliMetadataConfig[] = [
     installScope: 'Local Antigravity IDE / CLI Companion (%LOCALAPPDATA%\\agy\\bin)',
     runCommand: 'agy',
     permissionsRequired: ['Agent Runtime Control', 'Autonomous Workspace Execution'],
-    capabilities: ['Autonomous task planning', 'Multi-file edits', 'Agent observation'],
+    capabilities: ['Print mode (-p)', 'Desktop IDE launcher'],
     authEnvVars: ['GOOGLE_API_KEY', 'ANTIGRAVITY_TOKEN'],
     isAutomationRuntime: true,
   },
 ];
 
-const SECRET_KEY_PATTERN = /(api[_-]?key|token|secret|password|authorization|credential|private[_-]?key)/i;
-const SECRET_VALUE_PATTERN = /(sk-[a-zA-Z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,}|ghp_[0-9A-Za-z]{20,}|Bearer\s+[A-Za-z0-9._-]{12,})/g;
+const SECRET_KEY_PATTERN =
+  /(api[_-]?key|token|secret|password|authorization|credential|private[_-]?key)/i;
+const SECRET_VALUE_PATTERN =
+  /(sk-[a-zA-Z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,}|ghp_[0-9A-Za-z]{20,}|Bearer\s+[A-Za-z0-9._-]{12,})/g;
 
 /**
  * Redacts API keys, bearer tokens, and secret assignments from logs/output.
@@ -133,7 +156,7 @@ export function redactSecrets(input: string): string {
     .replace(SECRET_VALUE_PATTERN, '[REDACTED_SECRET]')
     .replace(
       /((?:ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|TOKEN|SECRET|PASSWORD)\s*[:=]\s*)([^\s"'`]+)/gi,
-      '$1[REDACTED_SECRET]'
+      '$1[REDACTED_SECRET]',
     );
 }
 
@@ -141,7 +164,7 @@ export function redactSecrets(input: string): string {
  * Filters environment variables so sensitive credentials are never logged or leaked.
  */
 export function sanitizeLaunchEnv(
-  customEnv: Record<string, string> = {}
+  customEnv: Record<string, string> = {},
 ): { mergedEnv: NodeJS.ProcessEnv; redactedKeys: string[] } {
   const redactedKeys: string[] = [];
   const safeCustomEnv: Record<string, string> = {};
@@ -175,33 +198,36 @@ export function getCapabilityMatrix(): CliCapabilityMatrixEntry[] {
       name: 'Claude Code',
       vendor: 'Anthropic PBC',
       windowsSupport: 'verified',
-      authMechanism: 'Anthropic OAuth (`claude login`) or `ANTHROPIC_API_KEY`',
+      authMechanism: 'Anthropic OAuth (`claude auth login`) or `ANTHROPIC_API_KEY`',
       nonInteractiveCheck: 'verified',
       interactivePtySession: 'verified',
       autonomousDaemonBridge: 'unsupported',
-      notes: 'Verified native Windows binary (`claude.exe`). Interactive TUI requires host terminal session.',
+      notes:
+        'Verified native Windows binary (`claude.exe`) supporting multi-turn `-p ... --output-format stream-json --resume <id>`.',
     },
     {
       id: 'codex',
       name: 'OpenAI Codex',
       vendor: 'OpenAI Inc.',
       windowsSupport: 'verified',
-      authMechanism: 'OpenAI OAuth or `OPENAI_API_KEY`',
+      authMechanism: 'OpenAI OAuth (`codex login`) or `OPENAI_API_KEY`',
       nonInteractiveCheck: 'verified',
       interactivePtySession: 'verified',
       autonomousDaemonBridge: 'unsupported',
-      notes: 'Verified Windows npm wrapper (`codex.cmd`). Interactive mode runs inside host terminal session.',
+      notes:
+        'Verified Windows npm Node entrypoint (`codex.js`) supporting `codex exec` and `codex exec resume`.',
     },
     {
       id: 'gemini',
       name: 'Gemini CLI',
       vendor: 'Google LLC',
       windowsSupport: 'verified',
-      authMechanism: 'Google OAuth or `GEMINI_API_KEY`',
+      authMechanism: 'Google OAuth (`~/.gemini`) or `GEMINI_API_KEY`',
       nonInteractiveCheck: 'verified',
       interactivePtySession: 'verified',
       autonomousDaemonBridge: 'unsupported',
-      notes: 'Verified Windows npm wrapper (`gemini.cmd`). Requires interactive Google login on first launch if no API key is set.',
+      notes:
+        'Verified Windows npm Node entrypoint (`gemini.js`) supporting multi-turn `-p ... -o stream-json --resume <id>`.',
     },
     {
       id: 'antigravity',
@@ -212,7 +238,8 @@ export function getCapabilityMatrix(): CliCapabilityMatrixEntry[] {
       nonInteractiveCheck: 'verified',
       interactivePtySession: 'unverified',
       autonomousDaemonBridge: 'unsupported',
-      notes: 'Local `agy.exe` CLI binary is detectable for version/workspace launch, but headless autonomous agent streaming over a public daemon API is unsupported in MVP.',
+      notes:
+        'Local `agy.exe` CLI binary is detectable for version/print mode, but headless autonomous agent streaming over a public daemon API is unsupported in MVP.',
     },
   ];
 }
@@ -221,10 +248,9 @@ export function getCapabilityMatrix(): CliCapabilityMatrixEntry[] {
  * Searches system PATH and common Windows install directories for executable candidates.
  */
 export function findExecutableOnPath(candidateNames: string[]): string | null {
-  const pathEnv = process.env.PATH || '';
+  const pathEnv = process.env.PATH || process.env.Path || '';
   const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
 
-  // Common additional Windows directories where developer CLIs might reside
   const homeDir = process.env.USERPROFILE || process.env.HOME || '';
   const additionalDirs = [
     path.join(homeDir, '.local', 'bin'),
@@ -261,29 +287,13 @@ export function findExecutableOnPath(candidateNames: string[]): string | null {
 async function runExecutableSafe(
   exePath: string,
   args: string[],
-  options: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv } = {}
+  options: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ stdout: string; stderr: string }> {
-  const isWinBatch = process.platform === 'win32' && /\.(cmd|bat)$/i.test(exePath);
   const timeout = options.timeout ?? 5000;
   const env = options.env ?? process.env;
+  const spec = resolveWindowsExecutableSpawn(exePath, args);
 
-  if (isWinBatch) {
-    // Run via cmd.exe using the executable's directory as cwd when no cwd is required,
-    // or pass the short/basename command if on PATH so spaces in USERPROFILE do not break cmd.exe parsing.
-    const exeDir = path.dirname(exePath);
-    const exeBase = path.basename(exePath);
-    const mergedPath = `${exeDir}${path.delimiter}${env.PATH || process.env.PATH || ''}`;
-    const res = await execFileAsync('cmd.exe', ['/d', '/s', '/c', exeBase, ...args], {
-      cwd: options.cwd || exeDir,
-      timeout,
-      windowsHide: true,
-      maxBuffer: 1024 * 64,
-      env: { ...env, PATH: mergedPath },
-    });
-    return { stdout: String(res.stdout || ''), stderr: String(res.stderr || '') };
-  }
-
-  const res = await execFileAsync(exePath, args, {
+  const res = await execFileAsync(spec.command, spec.args, {
     cwd: options.cwd,
     timeout,
     windowsHide: true,
@@ -296,7 +306,10 @@ async function runExecutableSafe(
 /**
  * Executes executable with versionArgs to extract live version string.
  */
-export async function queryExecutableVersion(exePath: string, args: string[] = ['--version']): Promise<string | null> {
+export async function queryExecutableVersion(
+  exePath: string,
+  args: string[] = ['--version'],
+): Promise<string | null> {
   try {
     const { stdout, stderr } = await runExecutableSafe(exePath, args, { timeout: 5000 });
     const output = (stdout || stderr || '').trim();
@@ -313,26 +326,32 @@ export async function queryExecutableVersion(exePath: string, args: string[] = [
  */
 export async function inspectCliStatus(nameOrId: string): Promise<CliStatusResponse> {
   const def = SUPPORTED_CLI_DEFINITIONS.find(
-    (d) => d.id === nameOrId.toLowerCase() || d.cliName === nameOrId.toLowerCase()
+    (d) => d.id === nameOrId.toLowerCase() || d.cliName === nameOrId.toLowerCase(),
   );
 
-  const candidates = def ? def.binaryCandidates : [nameOrId, `${nameOrId}.exe`, `${nameOrId}.cmd`];
+  const candidates = def
+    ? def.binaryCandidates
+    : [nameOrId, `${nameOrId}.exe`, `${nameOrId}.cmd`];
   const foundPath = findExecutableOnPath(candidates);
 
   if (!foundPath) {
     return {
       cliName: nameOrId,
       isInstalled: false,
+      authStatus: 'not_installed',
     };
   }
 
   const version = await queryExecutableVersion(foundPath, def?.versionArgs || ['--version']);
+  const auth = inspectProviderAuth(def?.id || nameOrId, foundPath);
 
   return {
     cliName: nameOrId,
     isInstalled: true,
     path: foundPath,
     version: version || 'Installed (version unknown)',
+    authStatus: auth.authStatus,
+    authDetail: auth.authDetail,
   };
 }
 
@@ -344,19 +363,28 @@ export async function getLiveCliCatalog(): Promise<AiCliTool[]> {
 
   for (const def of SUPPORTED_CLI_DEFINITIONS) {
     const status = await inspectCliStatus(def.id);
+    let uiStatus: AiCliTool['status'] = 'unavailable';
+    if (status.isInstalled) {
+      uiStatus = status.authStatus === 'unauthenticated' ? 'needs_setup' : 'installed';
+    }
+
     tools.push({
       id: def.id,
       name: def.name,
       cliName: def.cliName,
       description: def.description,
       vendor: def.vendor,
-      status: status.isInstalled ? 'installed' : def.id === 'gemini' ? 'needs_setup' : 'unavailable',
+      status: uiStatus,
       version: status.version || 'Not installed',
       installCommand: def.installCommand,
       installScope: def.installScope,
       runCommand: def.runCommand,
       permissionsRequired: def.permissionsRequired,
       capabilities: def.capabilities,
+      executablePath: status.path,
+      authStatus: status.authStatus,
+      authDetail: status.authDetail,
+      launchSupported: status.isInstalled,
     });
   }
 
@@ -407,7 +435,6 @@ export async function launchCliAgent(req: CliLaunchRequest): Promise<CliLaunchRe
     };
   }
 
-  // Honest provider-specific state for Antigravity autonomous runtime
   if (def.isAutomationRuntime && (!req.args || req.args.length === 0)) {
     return {
       toolId: def.id,
@@ -425,7 +452,7 @@ export async function launchCliAgent(req: CliLaunchRequest): Promise<CliLaunchRe
   try {
     const { stdout, stderr } = await runExecutableSafe(status.path, safeArgs, {
       cwd: workingDir,
-      timeout: 6000,
+      timeout: 8000,
       env: mergedEnv,
     });
     const combined = redactSecrets((stdout || stderr || '').trim());
@@ -437,11 +464,15 @@ export async function launchCliAgent(req: CliLaunchRequest): Promise<CliLaunchRe
       workingDir,
       version: status.version,
       exitCode: 0,
-      output: combined || `${def.name} (${status.version}) verified in ${workingDir}. Attach to host terminal session for interactive TUI.`,
+      output:
+        combined ||
+        `${def.name} (${status.version}) verified in ${workingDir}. Attach to host terminal session for interactive prompts.`,
       redactedEnvKeys: redactedKeys,
     };
   } catch (err: any) {
-    const rawMsg = redactSecrets(String(err.stderr || err.stdout || err.message || 'Unknown launch error').trim());
+    const rawMsg = redactSecrets(
+      String(err.stderr || err.stdout || err.message || 'Unknown launch error').trim(),
+    );
     const needsAuth = /auth|login|api[_ -]?key|unauthorized|credential/i.test(rawMsg);
     return {
       toolId: def.id,
@@ -473,7 +504,6 @@ export async function executeInstallTool(toolId: string): Promise<InstallToolRes
     };
   }
 
-  // Check if already installed
   const existing = await inspectCliStatus(def.id);
   if (existing.isInstalled) {
     return {

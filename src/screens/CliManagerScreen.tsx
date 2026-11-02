@@ -1,18 +1,19 @@
 import React, { useState } from 'react';
 import { useRelay } from '../context/RelayContext';
 import { AiCliTool } from '../types/relay';
-import { 
-  Sparkles, 
-  Cpu, 
-  Terminal, 
-  ShieldCheck, 
-  ShieldAlert, 
-  Check, 
-  Play, 
-  Download, 
-  Lock, 
-  Loader2, 
-  X 
+import {
+  Sparkles,
+  Cpu,
+  Terminal,
+  ShieldCheck,
+  ShieldAlert,
+  Check,
+  Play,
+  Download,
+  Lock,
+  Loader2,
+  RotateCw,
+  X,
 } from 'lucide-react';
 
 interface CliManagerScreenProps {
@@ -20,23 +21,46 @@ interface CliManagerScreenProps {
 }
 
 export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) {
-  const { cliTools, installCliTool, createSession, sessions, setActiveSessionId } = useRelay();
+  const {
+    cliTools,
+    refreshCliTools,
+    installCliTool,
+    createSession,
+    sessions,
+    setActiveSessionId,
+  } = useRelay();
 
   const [selectedToolForAuth, setSelectedToolForAuth] = useState<AiCliTool | null>(null);
   const [userConfirmedTrust, setUserConfirmedTrust] = useState(false);
   const [isInstalling, setIsInstalling] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const handleLaunch = (tool: AiCliTool) => {
-    const existing = sessions.find((s) => s.type === tool.id as any);
+  const handleRefreshCatalog = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshCliTools();
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleLaunch = async (tool: AiCliTool) => {
+    const sessionType =
+      tool.id === 'claude'
+        ? 'claude'
+        : tool.id === 'codex'
+        ? 'codex'
+        : tool.id === 'gemini'
+        ? 'gemini'
+        : tool.id === 'antigravity'
+        ? 'antigravity'
+        : 'powershell';
+
+    const existing = sessions.find((s) => s.type === sessionType);
     if (existing) {
       setActiveSessionId(existing.id);
     } else {
-      const sessionType = 
-        tool.id === 'claude' ? 'claude' : 
-        tool.id === 'codex' ? 'codex' : 
-        tool.id === 'gemini' ? 'gemini' : 
-        tool.id === 'antigravity' ? 'antigravity' : 'powershell';
-      createSession(`${tool.name}`, sessionType);
+      await createSession(`${tool.name}`, sessionType);
     }
     onSwitchToTerminal();
   };
@@ -53,14 +77,28 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
   return (
     <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#121419] text-zinc-100 font-sans">
       {/* Header Info */}
-      <div className="space-y-0.5">
-        <div className="flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-zinc-400" />
-          <h2 className="text-sm font-semibold text-zinc-100 tracking-tight">AI CLI Manager & Catalog</h2>
+      <div className="flex items-start justify-between gap-2">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-zinc-400" />
+            <h2 className="text-sm font-semibold text-zinc-100 tracking-tight">
+              AI CLI Manager & Catalog
+            </h2>
+          </div>
+          <p className="text-xs text-zinc-400">
+            Supervise, authorize, and steer AI coding agents executing natively on your Windows PC.
+          </p>
         </div>
-        <p className="text-xs text-zinc-400">
-          Supervise, authorize, and steer AI coding agents executing natively on your Windows PC.
-        </p>
+
+        <button
+          type="button"
+          onClick={handleRefreshCatalog}
+          className="px-2.5 py-1 bg-[#16181e] hover:bg-[#1e2129] border border-[#252831] rounded-md text-xs text-zinc-300 flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+          title="Re-scan Windows PC CLI binaries and authentication status"
+        >
+          <RotateCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : 'text-zinc-400'}`} />
+          <span>Refresh</span>
+        </button>
       </div>
 
       {/* Security Callout */}
@@ -79,7 +117,13 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
       {/* Agents Catalog List */}
       <div className="space-y-2.5">
         {cliTools.map((tool) => {
-          const isInstalled = tool.status === 'installed' || tool.status === 'running';
+          const isInstalled =
+            tool.status === 'installed' ||
+            tool.status === 'needs_setup' ||
+            tool.status === 'running' ||
+            Boolean(tool.executablePath);
+          const needsAuth = isInstalled && tool.authStatus === 'unauthenticated';
+          const isAuthenticated = isInstalled && tool.authStatus === 'authenticated';
 
           return (
             <div
@@ -98,30 +142,37 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
                       <Terminal className="w-4 h-4" />
                     )}
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-xs font-semibold text-white">{tool.name}</h3>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-[#20232d] text-zinc-400 border border-[#2c3240]">
                         {tool.cliName}
                       </span>
                     </div>
-                    <div className="text-[11px] text-zinc-500 flex items-center gap-2 mt-0.5">
+                    <div className="text-[11px] text-zinc-500 flex items-center gap-2 mt-0.5 flex-wrap">
                       <span>{tool.vendor}</span>
                       <span>·</span>
-                      <span className="font-mono">{tool.version}</span>
+                      <span className="font-mono text-zinc-300">{tool.version}</span>
                     </div>
                   </div>
                 </div>
 
                 {/* Status Indicator */}
-                <div className="shrink-0">
+                <div className="shrink-0 flex flex-col items-end gap-1">
                   {isInstalled ? (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-950/40 text-emerald-300 border border-emerald-800/40">
-                      <Check className="w-3 h-3 text-emerald-400" /> Installed
-                    </span>
+                    needsAuth ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-amber-950/40 text-amber-300 border border-amber-800/40">
+                        Needs Auth
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-950/40 text-emerald-300 border border-emerald-800/40">
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        {isAuthenticated ? 'Authenticated' : 'Installed'}
+                      </span>
+                    )
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-zinc-800 text-zinc-400">
-                      Available
+                      Not Installed
                     </span>
                   )}
                 </div>
@@ -145,20 +196,38 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
                 </div>
 
                 <div className="flex items-center gap-1.5 text-zinc-500 text-[10px] font-mono">
-                  <Lock className="w-3 h-3 text-zinc-500" />
-                  <span>Sandbox: {tool.permissionsRequired.join(', ')}</span>
+                  <Lock className="w-3 h-3 text-zinc-500 shrink-0" />
+                  <span className="truncate">Sandbox: {tool.permissionsRequired.join(', ')}</span>
                 </div>
+
+                {tool.authDetail && (
+                  <div className="text-[10px] font-mono text-zinc-400 truncate">
+                    Auth: <span className="text-zinc-300">{tool.authDetail}</span>
+                  </div>
+                )}
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-2 border-t border-[#22252e] flex items-center justify-between">
-                <span className="text-[11px] font-mono text-zinc-500">
-                  Target: <span className="text-zinc-300">{tool.installScope}</span>
+              <div className="pt-2 border-t border-[#22252e] flex items-center justify-between gap-2">
+                <span
+                  className="text-[11px] font-mono text-zinc-500 truncate min-w-0"
+                  title={tool.executablePath || tool.installScope}
+                >
+                  {tool.executablePath ? (
+                    <>
+                      Binary: <span className="text-zinc-300">{tool.executablePath}</span>
+                    </>
+                  ) : (
+                    <>
+                      Target: <span className="text-zinc-300">{tool.installScope}</span>
+                    </>
+                  )}
                 </span>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   {isInstalled ? (
                     <button
+                      type="button"
                       onClick={() => handleLaunch(tool)}
                       className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                     >
@@ -166,6 +235,7 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
                     </button>
                   ) : (
                     <button
+                      type="button"
                       onClick={() => {
                         setSelectedToolForAuth(tool);
                         setUserConfirmedTrust(false);
@@ -199,6 +269,7 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setSelectedToolForAuth(null)}
                 className="text-zinc-400 hover:text-white cursor-pointer"
               >
@@ -240,12 +311,14 @@ export function CliManagerScreen({ onSwitchToTerminal }: CliManagerScreenProps) 
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#242732]">
               <button
+                type="button"
                 onClick={() => setSelectedToolForAuth(null)}
                 className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white rounded cursor-pointer"
               >
                 Cancel
               </button>
               <button
+                type="button"
                 disabled={!userConfirmedTrust || isInstalling}
                 onClick={handleAuthorizeInstall}
                 className={`px-4 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${

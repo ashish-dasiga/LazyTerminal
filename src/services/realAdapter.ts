@@ -511,7 +511,14 @@ class RealCliService implements ICliService {
     const res = await apiRequest<any>('/api/v1/cli/tools');
     const rawList: any[] = Array.isArray(res) ? res : Array.isArray(res?.tools) ? res.tools : [];
     return rawList.map((item) => {
-      const installed = Boolean(item.isInstalled || item.status === 'installed');
+      const installed = Boolean(
+        item.isInstalled ||
+          item.status === 'installed' ||
+          item.status === 'needs_setup' ||
+          item.status === 'running' ||
+          item.executablePath ||
+          item.path,
+      );
       const authStatus =
         item.authStatus || (installed ? 'unknown' : 'not_installed');
       let status: AiCliTool['status'] = installed ? 'installed' : 'unavailable';

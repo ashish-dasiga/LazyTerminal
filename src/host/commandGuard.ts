@@ -8,7 +8,8 @@ const MAX_COMMAND_LENGTH = 8192;
 
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
-    pattern: /\b(format|diskpart)\b/i,
+    pattern:
+      /(?:^|[;&|\n])\s*format(?:\.com|\.exe)?\s+[A-Za-z]:|\bFormat-Volume\b|\bdiskpart(?:\.exe)?\b/i,
     reason: 'Disk formatting or partition manipulation commands are blocked on the remote host.',
   },
   {

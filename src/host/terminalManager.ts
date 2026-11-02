@@ -1,4 +1,4 @@
-import { spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, spawnSync, ChildProcess, ChildProcessWithoutNullStreams } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -16,6 +16,11 @@ import {
   resolveAuthorizedWorkingDir,
 } from './config';
 import { validateCommandSafety } from './commandGuard';
+import {
+  executeAiProviderTurn,
+  inspectProviderAuth,
+  SupportedAiProviderId,
+} from './aiProviders';
 import { HostLogger } from './logger';
 
 interface KnownCliMeta {
@@ -73,12 +78,26 @@ interface PendingCommandExecution {
 interface ManagedSessionState {
   session: TerminalSession;
   proc: ChildProcessWithoutNullStreams | null;
+  activeAiChild?: ChildProcess | null;
+  providerSessionId?: string;
+  aiCancelled?: boolean;
   readyPromise: Promise<void> | null;
   initBuffer: string;
   isInitializing: boolean;
   pending: PendingCommandExecution | null;
   emitter: EventEmitter;
   seqCounter: number;
+}
+
+function isAiProviderSessionType(
+  type: TerminalSession['type'],
+): type is SupportedAiProviderId {
+  return (
+    type === 'claude' ||
+    type === 'gemini' ||
+    type === 'codex' ||
+    type === 'antigravity'
+  );
 }
 
 function getExtraUserBinDirs(): string[] {
@@ -275,16 +294,40 @@ export class TerminalSessionManager {
       isRunning: false,
     };
 
-    this.sessions.set(id, {
+    const managed: ManagedSessionState = {
       session,
       proc: null,
+      activeAiChild: null,
+      providerSessionId: undefined,
+      aiCancelled: false,
       readyPromise: null,
       initBuffer: '',
       isInitializing: false,
       pending: null,
       emitter: new EventEmitter(),
       seqCounter: 0,
-    });
+    };
+
+    if (isAiProviderSessionType(req.type)) {
+      const meta = KNOWN_AI_CLIS[req.type];
+      const foundBin = meta ? findExecutableOnPath(meta.binaryCandidates) : null;
+      if (meta && foundBin) {
+        const auth = inspectProviderAuth(req.type, foundBin);
+        this.pushToSessionBuffer(
+          managed,
+          'system',
+          `[${meta.toolName}] Bound to ${session.workingDir} (${foundBin} · ${auth.authDetail || auth.authStatus}). Enter a prompt or CLI flags.`,
+        );
+      } else if (meta) {
+        this.pushToSessionBuffer(
+          managed,
+          'error',
+          `[${meta.toolName}] Not installed on Windows PATH. Install with: ${meta.installCommand}`,
+        );
+      }
+    }
+
+    this.sessions.set(id, managed);
 
     this.logger.info('Created terminal session', {
       sessionId: id,
@@ -292,7 +335,10 @@ export class TerminalSessionManager {
       workingDir: session.workingDir,
     });
 
-    return { ...session };
+    return {
+      ...session,
+      buffer: [...session.buffer],
+    };
   }
 
   private ensureManagedSession(
@@ -305,7 +351,15 @@ export class TerminalSessionManager {
       const initialDir = dirRes.ok
         ? dirRes.resolvedPath
         : this.config.defaultWorkspaceRoot;
-      const inferredType: TerminalSession['type'] = sessionId.includes('cmd')
+      const inferredType: TerminalSession['type'] = sessionId.includes('claude')
+        ? 'claude'
+        : sessionId.includes('gemini')
+        ? 'gemini'
+        : sessionId.includes('codex')
+        ? 'codex'
+        : sessionId.includes('antigravity')
+        ? 'antigravity'
+        : sessionId.includes('cmd')
         ? 'cmd'
         : sessionId.includes('bash')
         ? 'bash'
@@ -315,7 +369,15 @@ export class TerminalSessionManager {
         session: {
           id: sessionId,
           title:
-            inferredType === 'cmd'
+            inferredType === 'claude'
+              ? 'Claude Code'
+              : inferredType === 'gemini'
+              ? 'Gemini CLI'
+              : inferredType === 'codex'
+              ? 'OpenAI Codex'
+              : inferredType === 'antigravity'
+              ? 'Antigravity'
+              : inferredType === 'cmd'
               ? 'Command Prompt (CMD)'
               : inferredType === 'bash'
               ? 'Bash'
@@ -327,6 +389,9 @@ export class TerminalSessionManager {
           isRunning: false,
         },
         proc: null,
+        activeAiChild: null,
+        providerSessionId: undefined,
+        aiCancelled: false,
         readyPromise: null,
         initBuffer: '',
         isInitializing: false,
@@ -496,7 +561,7 @@ export class TerminalSessionManager {
   private appendOutputLine(
     state: ManagedSessionState,
     pending: PendingCommandExecution,
-    lineType: 'output' | 'error' | 'system',
+    lineType: TerminalLine['type'],
     content: string,
   ): void {
     const clean = content.replace(/\r$/, '');
@@ -723,13 +788,27 @@ export class TerminalSessionManager {
           lines: [{ type: 'error', content: dirCheck.error }],
         };
       }
-      if (state.session.history.length === 0 && !dirCheck.mappedFromVirtual) {
+      if (
+        (state.session.history.length === 0 || isAiProviderSessionType(state.session.type)) &&
+        !dirCheck.mappedFromVirtual
+      ) {
+        if (
+          isAiProviderSessionType(state.session.type) &&
+          state.session.workingDir.toLowerCase() !== dirCheck.resolvedPath.toLowerCase()
+        ) {
+          state.providerSessionId = undefined;
+        }
         state.session.workingDir = dirCheck.resolvedPath;
       }
     }
 
-    // 3. Check if an uninstalled AI CLI was invoked
-    const missingCli = this.detectMissingAiCli(req.command);
+    // 3. Check if an uninstalled AI CLI was invoked (or if this session is bound to an uninstalled AI CLI)
+    const missingCli = isAiProviderSessionType(state.session.type)
+      ? (() => {
+          const meta = KNOWN_AI_CLIS[state.session.type];
+          return meta && !findExecutableOnPath(meta.binaryCandidates) ? meta : null;
+        })()
+      : this.detectMissingAiCli(req.command);
     if (missingCli) {
       const msg = `'${missingCli.cliName}' is not installed on the Windows host PATH. Install with: ${missingCli.installCommand}`;
       this.pushToSessionBuffer(state, 'error', msg);
@@ -764,6 +843,77 @@ export class TerminalSessionManager {
       ...state.session.history.filter((h) => h !== trimmedCmd),
     ].slice(0, 100);
     this.pushToSessionBuffer(state, 'input', trimmedCmd);
+
+    // 5. Dedicated AI CLI session execution (Claude Code, Gemini CLI, Codex CLI, Antigravity)
+    if (isAiProviderSessionType(state.session.type)) {
+      const providerId = state.session.type;
+      const meta = KNOWN_AI_CLIS[providerId];
+      const executablePath = findExecutableOnPath(meta.binaryCandidates)!;
+      const aiTimeoutMs = Math.max(this.config.commandTimeoutMs, 90_000);
+
+      state.session.isRunning = true;
+      state.aiCancelled = false;
+
+      return new Promise<ExecuteCommandResponse & { workingDir: string }>((resolve) => {
+        const noopTimer = setTimeout(() => {}, aiTimeoutMs + 5000);
+        const pending: PendingCommandExecution = {
+          commandId,
+          command: trimmedCmd,
+          lines: [],
+          stdoutRemainder: '',
+          stderrRemainder: '',
+          totalBytes: 0,
+          truncated: false,
+          timeoutHandle: noopTimer,
+          resolve,
+        };
+        state.pending = pending;
+
+        void executeAiProviderTurn({
+          providerId,
+          executablePath,
+          rawInput: trimmedCmd,
+          workingDir: state.session.workingDir,
+          providerSessionId: state.providerSessionId,
+          envOverrides: req.envOverrides,
+          augmentedPath: buildAugmentedPathEnv(),
+          timeoutMs: aiTimeoutMs,
+          onLine: (type, content) => {
+            if (state.pending === pending) {
+              this.appendOutputLine(state, pending, type, content);
+            }
+          },
+          onSpawn: (aiChild) => {
+            state.activeAiChild = aiChild;
+            state.session.activePid = aiChild.pid;
+          },
+          isCancelled: () => Boolean(state.aiCancelled),
+        }).then((turnRes) => {
+          clearTimeout(noopTimer);
+          if (state.pending !== pending) {
+            return;
+          }
+          state.pending = null;
+          state.activeAiChild = null;
+          state.session.activePid = undefined;
+          state.session.isRunning = false;
+          state.providerSessionId = turnRes.nextProviderSessionId;
+
+          state.emitter.emit('commandComplete', {
+            commandId,
+            exitCode: turnRes.exitCode,
+            workingDir: state.session.workingDir,
+          });
+
+          resolve({
+            commandId,
+            lines: pending.lines,
+            exitCode: turnRes.exitCode,
+            workingDir: state.session.workingDir,
+          });
+        });
+      });
+    }
 
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -879,6 +1029,7 @@ export class TerminalSessionManager {
       return;
     }
 
+    state.aiCancelled = true;
     const sigMsg = `^C\n[${req.signal}] Process interrupted by client signal.`;
     if (state.pending) {
       const pending = state.pending;
@@ -886,6 +1037,11 @@ export class TerminalSessionManager {
       clearTimeout(pending.timeoutHandle);
       this.appendOutputLine(state, pending, 'error', sigMsg);
       state.session.isRunning = false;
+      if (state.activeAiChild) {
+        killProcessTree(state.activeAiChild.pid);
+        state.activeAiChild = null;
+        state.session.activePid = undefined;
+      }
       if (state.proc) {
         killProcessTree(state.proc.pid);
         state.proc = null;
@@ -898,10 +1054,16 @@ export class TerminalSessionManager {
         exitCode: 130,
         workingDir: state.session.workingDir,
       });
-    } else if (state.proc) {
-      killProcessTree(state.proc.pid);
-      state.proc = null;
-      state.readyPromise = null;
+    } else if (state.activeAiChild || state.proc) {
+      if (state.activeAiChild) {
+        killProcessTree(state.activeAiChild.pid);
+        state.activeAiChild = null;
+      }
+      if (state.proc) {
+        killProcessTree(state.proc.pid);
+        state.proc = null;
+        state.readyPromise = null;
+      }
       state.session.activePid = undefined;
       state.session.isRunning = false;
       this.pushToSessionBuffer(state, 'error', sigMsg);
@@ -917,6 +1079,7 @@ export class TerminalSessionManager {
     const state = this.sessions.get(sessionId);
     if (!state) return;
 
+    state.aiCancelled = true;
     if (state.pending) {
       clearTimeout(state.pending.timeoutHandle);
       state.pending.resolve({
@@ -926,6 +1089,11 @@ export class TerminalSessionManager {
         workingDir: state.session.workingDir,
       });
       state.pending = null;
+    }
+
+    if (state.activeAiChild) {
+      killProcessTree(state.activeAiChild.pid);
+      state.activeAiChild = null;
     }
 
     if (state.proc) {
