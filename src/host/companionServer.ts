@@ -109,6 +109,8 @@ export async function startHostCompanionServer(
             new Promise<void>((resClose) => {
               companion.shutdown();
               server.close(() => resClose());
+              // Drop lingering SSE/keep-alive sockets so shutdown never hangs on connected clients
+              server.closeAllConnections?.();
             }),
         });
       }

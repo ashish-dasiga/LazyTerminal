@@ -78,7 +78,7 @@ fsRouter.get('/list', async (req: Request, res: Response): Promise<void> => {
   try {
     const allowedRoots = getRequestAllowedRoots(res);
     const projectPath = resolveWorkspaceProjectPath(
-      (req.query.projectPath || req.query.dir) as string,
+      (req.query.projectPath || req.query.dir || req.query.path) as string,
       getDefaultRoot(res),
     );
     const subDirectory = ((req.query.subDirectory || req.query.subdir) as string) || '';

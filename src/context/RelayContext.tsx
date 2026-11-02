@@ -1824,6 +1824,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         prev.map((s) => {
           if (s.id !== activeSessionId) return s;
           if (s.buffer.some((b) => b.id === streamLine.id)) return s;
+          // The command echo is already appended locally on submit; don't render the host's copy twice
+          if (streamLine.type === 'input') {
+            const lastInput = [...s.buffer].reverse().find((b) => b.type === 'input');
+            if (lastInput && lastInput.content === streamLine.content) return s;
+          }
           return {
             ...s,
             buffer: [

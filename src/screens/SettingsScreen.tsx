@@ -17,6 +17,7 @@ export function SettingsScreen() {
     currentUser, 
     loginUser,
     device, 
+    sessions,
     togglePcOnline, 
     fontSize, 
     setFontSize, 
@@ -24,6 +25,9 @@ export function SettingsScreen() {
     regenerateConnectionKey,
     generatedConnectionKey
   } = useRelay();
+
+  const detectedShellTitle =
+    sessions.find((s) => s.type === 'powershell')?.title || 'Windows PowerShell';
 
   const [copiedKey, setCopiedKey] = useState(false);
   const [isSignInOpen, setIsSignInOpen] = useState(false);
@@ -123,6 +127,7 @@ export function SettingsScreen() {
                 value={passInput}
                 onChange={(e) => setPassInput(e.target.value)}
                 placeholder="••••••••••••"
+                required
                 className="w-full px-2.5 py-1.5 text-xs bg-[#181a22] border border-[#2c3140] rounded text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-blue-500 font-mono"
               />
             </div>
@@ -130,32 +135,27 @@ export function SettingsScreen() {
               <button
                 type="button"
                 onClick={() => setIsSignInOpen(false)}
-                className="px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-200"
+                className="px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                disabled={isLoggingIn || !emailInput.trim()}
-                className="px-3 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors cursor-pointer"
+                disabled={isLoggingIn}
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded text-xs font-medium cursor-pointer transition-colors"
               >
-                {isLoggingIn ? 'Signing In...' : 'Sign In'}
+                {isLoggingIn ? 'Signing In...' : 'Authenticate'}
               </button>
             </div>
           </form>
         )}
 
         {signInSuccess && (
-          <div className="p-2 bg-emerald-950/40 border border-emerald-800/40 rounded text-xs text-emerald-300 flex items-center gap-1.5">
-            <Check className="w-3.5 h-3.5" />
+          <div className="p-2 bg-emerald-950/30 border border-emerald-800/40 rounded text-[11px] text-emerald-300 flex items-center gap-1.5 font-mono">
+            <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
             <span>{signInSuccess}</span>
           </div>
         )}
-
-        <div className="text-[11px] font-mono text-zinc-500 pt-1.5 border-t border-[#22252e] flex items-center justify-between">
-          <span>Session Token: Valid</span>
-          <span className="text-emerald-400">Authenticated</span>
-        </div>
       </div>
 
       {/* 2. Windows PC Connection & Key Management */}
@@ -186,8 +186,8 @@ export function SettingsScreen() {
             <span className="text-zinc-200">{device.ip}:{device.port}</span>
           </div>
           <div className="flex justify-between text-zinc-400">
-            <span>ConPTY Terminal Shell:</span>
-            <span className="text-zinc-300">PowerShell 7.4 (ConPTY)</span>
+            <span>Terminal Shell:</span>
+            <span className="text-zinc-300">{detectedShellTitle}</span>
           </div>
         </div>
 
