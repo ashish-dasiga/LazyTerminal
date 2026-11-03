@@ -185,7 +185,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
 
       if (err.name === 'AbortError') {
         lastError = new ApiError(
-          `Request to ${path} timed out after ${timeoutMs}ms`,
+          `Request to ${url} timed out after ${timeoutMs}ms. Please ensure your PC and phone are on the same Wi-Fi and the Lazy Terminal Host Companion is running.`,
           0,
           'TIMEOUT',
           true,

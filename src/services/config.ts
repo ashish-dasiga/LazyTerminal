@@ -126,7 +126,7 @@ export function getAppConfig(): AppConfig {
     adapterMode,
     hostBaseUrl,
     hostWsUrl: `${wsProtocol}://${wsHost}/ws`,
-    requestTimeoutMs: 10_000,
+    requestTimeoutMs: 15_000,
     maxRetries: 1,
     debugLogging: adapterMode === 'mock',
   };

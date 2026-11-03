@@ -57,6 +57,19 @@ export function MobileConnectionFlow() {
       return;
     }
 
+    // Auto-save host address if changed
+    if (customHostInput.trim()) {
+      let clean = customHostInput.trim();
+      if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+        clean = `http://${clean}`;
+      }
+      clean = clean.replace(/\/+$/, '');
+      if (clean !== hostUrl) {
+        setHostUrl(clean);
+        setHostUrlState(clean);
+      }
+    }
+
     setValidationError(null);
     if (connectionError) setConnectionError(null);
     setIsVerifying(true);
@@ -112,7 +125,7 @@ export function MobileConnectionFlow() {
               Connect to Windows PC
             </h1>
             <p className="text-xs text-zinc-400 leading-relaxed max-w-xs mx-auto">
-              Enter the 6-digit pairing code shown on your Windows companion app to establish an encrypted local tunnel.
+              Enter the Host PC IP and 6-digit pairing code shown on your Windows companion app.
             </p>
           </div>
 
@@ -124,31 +137,62 @@ export function MobileConnectionFlow() {
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
               <div className="leading-relaxed break-words flex-1">
-                {activeError}
-                {activeError.toLowerCase().includes('unable to connect') && !isEditingHost && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomHostInput(hostUrl);
-                      setIsEditingHost(true);
-                    }}
-                    className="block mt-1.5 text-sky-400 hover:text-sky-300 underline font-semibold cursor-pointer"
-                  >
-                    Edit Host PC IP Address &rarr;
-                  </button>
-                )}
+                <div className="font-semibold text-red-200 mb-0.5">Connection Failed</div>
+                <div>{activeError}</div>
+                <div className="mt-2 text-[10px] text-zinc-400 leading-tight border-t border-red-500/20 pt-1.5 space-y-0.5">
+                  <div>1. Ensure phone & PC are on the same Wi-Fi.</div>
+                  <div>2. Check that the Lazy Terminal Companion is open on PC.</div>
+                  <div>3. Verify the Host PC IP below matches your PC screen.</div>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Single Input Pairing Form */}
+          {/* Dual Input Pairing Form: Host IP + Code */}
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Host PC IP Field */}
+            <div className="space-y-1 text-left">
+              <div className="flex items-center justify-between">
+                <label 
+                  htmlFor="host-ip-input"
+                  className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block"
+                >
+                  Host PC LAN Address
+                </label>
+                <span className="text-[10px] text-zinc-500 font-mono">From PC Screen</span>
+              </div>
+              <div className="relative">
+                <input
+                  id="host-ip-input"
+                  name="hostAddress"
+                  aria-label="Host PC Address"
+                  type="text"
+                  value={customHostInput}
+                  onChange={(e) => {
+                    setCustomHostInput(e.target.value);
+                    if (validationError) setValidationError(null);
+                    if (connectionError) setConnectionError(null);
+                  }}
+                  onBlur={handleSaveHost}
+                  placeholder="http://192.168.1.x:9871"
+                  disabled={isVerifying}
+                  className="w-full h-11 px-3.5 bg-[#0d1017]/90 border border-zinc-700/60 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm font-mono text-white placeholder:text-zinc-600 outline-none transition-all duration-150 disabled:opacity-50"
+                />
+              </div>
+              {customHostInput.includes('10.0.2.2') && (
+                <p className="text-[10px] text-amber-400/90 leading-tight pt-0.5">
+                  ⚠️ Note: 10.0.2.2 is for emulator only. On a physical phone, replace with your PC&apos;s Wi-Fi IP (e.g. http://192.168.1.x:9871).
+                </p>
+              )}
+            </div>
+
+            {/* Pairing Code Field */}
             <div className="space-y-1.5 text-left">
               <label 
                 htmlFor="pairing-code-input"
                 className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block"
               >
-                Pairing Code
+                6-Digit Pairing Code
               </label>
 
               <div className="relative">
@@ -173,7 +217,7 @@ export function MobileConnectionFlow() {
               </div>
             </div>
 
-            {/* Single Primary Action Button */}
+            {/* Primary Action Button */}
             <button
               type="submit"
               disabled={!tokenInput.trim() || isVerifying}
@@ -193,50 +237,6 @@ export function MobileConnectionFlow() {
                 <span>Connect to PC</span>
               )}
             </button>
-
-            {/* Host PC IP Indicator & Quick Edit */}
-            <div className="pt-2 text-center">
-              {!isEditingHost ? (
-                <div className="flex items-center justify-center gap-1.5 text-[11px] text-zinc-400">
-                  <span className="font-mono truncate max-w-[210px]">Host: {hostUrl}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomHostInput(hostUrl);
-                      setIsEditingHost(true);
-                    }}
-                    className="text-sky-400 hover:text-sky-300 underline underline-offset-2 ml-1 cursor-pointer font-medium"
-                  >
-                    Change IP
-                  </button>
-                </div>
-              ) : (
-                <div className="p-3 bg-[#0c0f17] rounded-xl border border-zinc-700/60 text-left space-y-2 mt-2">
-                  <label className="text-[10px] uppercase font-bold tracking-wider text-zinc-300 block">
-                    Host PC LAN Address (from PC screen)
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={customHostInput}
-                      onChange={(e) => setCustomHostInput(e.target.value)}
-                      placeholder="http://192.168.1.4:3000"
-                      className="flex-1 h-9 px-2.5 bg-[#141824] border border-zinc-700 focus:border-blue-500 rounded-lg text-xs font-mono text-white placeholder:text-zinc-600 outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSaveHost}
-                      className="px-3 h-9 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer"
-                    >
-                      Save
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-zinc-500 leading-tight">
-                    Enter the Host LAN URL shown on your Windows Companion window (e.g. http://192.168.1.4:3000).
-                  </p>
-                </div>
-              )}
-            </div>
           </form>
 
         </div>
