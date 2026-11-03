@@ -33,6 +33,8 @@ export function TerminalScreen() {
     return true;
   });
 
+  const promptPath = activeSession.workingDir || activeProject.path;
+
   const filteredBuffer = searchQuery.trim()
     ? visibleBuffer.filter((line) =>
         line.content.toLowerCase().includes(searchQuery.toLowerCase())
@@ -157,51 +159,54 @@ export function TerminalScreen() {
         )}
 
         {/* Authentic terminal prompt line with blinking cursor */}
-        <div className="mt-3 pt-1 flex items-center gap-1.5 text-zinc-300 select-none text-xs">
+        <div
+          className="mt-3 pt-1 flex items-center gap-1.5 text-zinc-300 select-none text-xs"
+          data-testid="terminal-prompt-line"
+        >
           {activeSession.type === 'cmd' ? (
             <>
-              <span className="truncate max-w-[240px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[240px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : activeSession.type === 'bash' ? (
             <>
-              <span className="truncate max-w-[240px] font-medium text-emerald-400">{activeProject.path.replace(/\\/g, '/')}</span>
+              <span className="truncate max-w-[240px] font-medium text-emerald-400">{promptPath.replace(/\\/g, '/')}</span>
               <span className="text-zinc-500 font-bold">$</span>
             </>
           ) : activeSession.type === 'codex' ? (
             <>
               <span className="text-cyan-400 font-medium">codex</span>
-              <span className="truncate max-w-[200px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[200px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : activeSession.type === 'gemini' ? (
             <>
               <span className="text-blue-400 font-medium">gemini</span>
-              <span className="truncate max-w-[200px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[200px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : activeSession.type === 'claude' ? (
             <>
               <span className="text-purple-400 font-medium">claude</span>
-              <span className="truncate max-w-[200px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[200px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : activeSession.type === 'antigravity' ? (
             <>
               <span className="text-amber-400 font-medium">antigravity</span>
-              <span className="truncate max-w-[190px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[190px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : activeSession.type === 'build' ? (
             <>
               <span className="text-orange-400 font-medium">[dev-server]</span>
-              <span className="truncate max-w-[190px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[190px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           ) : (
             <>
               <span className="text-zinc-400 font-medium">PS</span>
-              <span className="truncate max-w-[220px] font-medium">{activeProject.path}</span>
+              <span className="truncate max-w-[220px] font-medium">{promptPath}</span>
               <span className="text-zinc-500 font-bold">&gt;</span>
             </>
           )}

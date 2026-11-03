@@ -1,10 +1,8 @@
 /**
- * Lazy Terminal Ã¢â‚¬â€ Real backend adapter for the Windows PC companion.
+ * Lazy Terminal — Real backend adapter for the Windows PC companion.
  *
- * Implements `IRelayBackendAdapter` by making actual HTTP/WS calls to the
- * PC host APIs.  When a PC-side API is not yet implemented (Ashish,
- * Ashritha, Shreya branches), methods fail fast with clear error messages
- * instead of returning fake success.
+ * Implements `IRelayBackendAdapter` by making actual HTTP/SSE calls to the
+ * authenticated Windows PC host companion APIs.
  *
  * @module realAdapter
  */
@@ -13,6 +11,7 @@ import {
   IRelayBackendAdapter,
   IAuthService,
   IConnectionService,
+  IWorkspaceService,
   ITerminalService,
   IFileSystemService,
   IGitService,
@@ -28,6 +27,9 @@ import {
   ConnectHostRequest,
   ConnectHostResponse,
   HostServerStatusResponse,
+  WorkspaceInfo,
+  WorkspaceStateResponse,
+  WorkspaceBrowseResponse,
   CreateSessionRequest,
   ExecuteCommandRequest,
   ExecuteCommandResponse,
@@ -38,7 +40,10 @@ import {
   WriteFileRequest,
   WriteFileResponse,
   CreateFileRequest,
+  RenameFileRequest,
+  RenameFileResponse,
   DeleteFileRequest,
+  FileStatResponse,
   GitStatusResponse,
   GitCommitRequest,
   GitCommitResponse,
@@ -56,11 +61,12 @@ import {
   DeviceInfo,
   DevServer,
   ProjectFile,
+  TerminalLine,
   TerminalSession,
   UserAccount,
   AiCliTool,
 } from '../types/relay';
-import { apiRequest, setSessionToken, HostUnreachableError, ApiError } from './apiClient';
+import { apiRequest, getSessionToken, setSessionToken, ApiError } from './apiClient';
 import { enqueueIntent, listIntents } from './offlineQueue';
 import { getAppConfig } from './config';
 
@@ -75,6 +81,7 @@ export class RealRelayBackendAdapter implements IRelayBackendAdapter {
 
   auth: IAuthService;
   connection: IConnectionService;
+  workspace: IWorkspaceService;
   terminal: ITerminalService;
   fileSystem: IFileSystemService;
   git: IGitService;
@@ -86,6 +93,7 @@ export class RealRelayBackendAdapter implements IRelayBackendAdapter {
     this.backendEndpoint = endpointUrl || getAppConfig().hostBaseUrl;
     this.auth = new RealAuthService();
     this.connection = new RealConnectionService();
+    this.workspace = new RealWorkspaceService();
     this.terminal = new RealTerminalService();
     this.fileSystem = new RealFileSystemService();
     this.git = new RealGitService();
@@ -96,7 +104,7 @@ export class RealRelayBackendAdapter implements IRelayBackendAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Auth Service Ã¢â‚¬â€ real HTTP calls
+// 1. Auth Service
 // ---------------------------------------------------------------------------
 
 class RealAuthService implements IAuthService {
@@ -182,8 +190,8 @@ class RealConnectionService implements IConnectionService {
     }
   }
 
-  async getHostDeviceInfo(): Promise<DeviceInfo> {
-    return apiRequest<DeviceInfo>('/api/v1/host/status');
+  async getHostDeviceInfo(): Promise<DeviceInfo & { activeWorkspaceRoot?: string }> {
+    return apiRequest<DeviceInfo & { activeWorkspaceRoot?: string }>('/api/v1/host/status');
   }
 
   async setHostServerStatus(status: 'start' | 'stop' | 'restart'): Promise<HostServerStatusResponse> {
@@ -195,12 +203,71 @@ class RealConnectionService implements IConnectionService {
 }
 
 // ---------------------------------------------------------------------------
+// 2B. Workspace Service
+// ---------------------------------------------------------------------------
+
+class RealWorkspaceService implements IWorkspaceService {
+  async getState(): Promise<WorkspaceStateResponse> {
+    return apiRequest<WorkspaceStateResponse>('/api/v1/workspace');
+  }
+
+  async browse(dirPath?: string): Promise<WorkspaceBrowseResponse> {
+    const params = new URLSearchParams();
+    if (dirPath) params.set('path', dirPath);
+    const qs = params.toString();
+    return apiRequest<WorkspaceBrowseResponse>(`/api/v1/workspace/browse${qs ? `?${qs}` : ''}`);
+  }
+
+  async selectWorkspace(
+    folderPath: string,
+  ): Promise<{ workspace: WorkspaceInfo; recentWorkspaces: WorkspaceInfo[] }> {
+    return apiRequest<{ workspace: WorkspaceInfo; recentWorkspaces: WorkspaceInfo[] }>(
+      '/api/v1/workspace/select',
+      {
+        method: 'POST',
+        body: { path: folderPath },
+      },
+    );
+  }
+
+  async pickNativeFolder(
+    initialPath?: string,
+  ): Promise<{ cancelled: boolean; workspace?: WorkspaceInfo }> {
+    return apiRequest<{ cancelled: boolean; workspace?: WorkspaceInfo }>(
+      '/api/v1/workspace/pick-native',
+      {
+        method: 'POST',
+        body: { initialPath },
+        timeoutMs: 120_000,
+      },
+    );
+  }
+
+  async scanRepositories(rootPath?: string): Promise<{ repositories: WorkspaceInfo[] }> {
+    return apiRequest<{ repositories: WorkspaceInfo[] }>('/api/v1/workspace/scan-repos', {
+      method: 'POST',
+      body: { rootPath },
+      timeoutMs: 30_000,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Terminal & PTY Service
 // ---------------------------------------------------------------------------
 
 class RealTerminalService implements ITerminalService {
   async listSessions(): Promise<TerminalSession[]> {
-    return apiRequest<TerminalSession[]>('/api/v1/pty/sessions');
+    const res = await apiRequest<TerminalSession[] | { sessions?: TerminalSession[] }>(
+      '/api/v1/pty/sessions',
+    );
+    if (Array.isArray(res)) return res;
+    if (res && Array.isArray(res.sessions)) return res.sessions;
+    return [];
+  }
+
+  async getSession(sessionId: string): Promise<TerminalSession> {
+    return apiRequest<TerminalSession>(`/api/v1/pty/sessions/${encodeURIComponent(sessionId)}`);
   }
 
   async createSession(req: CreateSessionRequest): Promise<TerminalSession> {
@@ -222,7 +289,8 @@ class RealTerminalService implements ITerminalService {
       {
         method: 'POST',
         body: req,
-        timeoutMs: 30_000, // commands may take longer
+        timeoutMs: 120_000,
+        retries: 0, // Never retry non-idempotent terminal commands!
       },
     );
   }
@@ -233,8 +301,52 @@ class RealTerminalService implements ITerminalService {
       {
         method: 'POST',
         body: { signal: req.signal },
+        retries: 0,
       },
     );
+  }
+
+  async resizeSession(sessionId: string, cols: number, rows: number): Promise<void> {
+    await apiRequest<void>(
+      `/api/v1/pty/sessions/${encodeURIComponent(sessionId)}/resize`,
+      {
+        method: 'POST',
+        body: { cols, rows },
+        retries: 0,
+      },
+    );
+  }
+
+  subscribeSessionStream(
+    sessionId: string,
+    onLine: (line: TerminalLine & { workingDir?: string }) => void,
+    onError?: (err: unknown) => void,
+  ): () => void {
+    const token = getSessionToken();
+    const config = getAppConfig();
+    const params = new URLSearchParams();
+    if (token) params.set('token', token);
+    const streamUrl = `${config.hostBaseUrl}/api/v1/pty/sessions/${encodeURIComponent(sessionId)}/stream?${params.toString()}`;
+
+    if (typeof EventSource !== 'undefined') {
+      const es = new EventSource(streamUrl);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed && typeof parsed.content === 'string') {
+            onLine(parsed);
+          }
+        } catch {}
+      };
+      es.onerror = (err) => {
+        onError?.(err);
+      };
+      return () => {
+        es.close();
+      };
+    }
+
+    return () => {};
   }
 }
 
@@ -244,24 +356,35 @@ class RealTerminalService implements ITerminalService {
 
 class RealFileSystemService implements IFileSystemService {
   async listFiles(req: ListFilesRequest): Promise<ProjectFile[]> {
-    const params = new URLSearchParams({ projectPath: req.projectPath, dir: req.projectPath });
-    if (req.subDirectory) { params.set('subDirectory', req.subDirectory); params.set('subdir', req.subDirectory); }
-    const res = await apiRequest<{ files?: ProjectFile[] } | ProjectFile[]>(`/api/v1/fs/list?${params}`);
+    const params = new URLSearchParams({ projectPath: req.projectPath });
+    if (req.subDirectory) params.set('subDirectory', req.subDirectory);
+    if (req.limit != null) params.set('limit', String(req.limit));
+    if (req.offset != null) params.set('offset', String(req.offset));
+    const res = await apiRequest<{ files?: ProjectFile[] } | ProjectFile[]>(
+      `/api/v1/fs/list?${params.toString()}`,
+    );
     if (Array.isArray(res)) return res;
-    if (res && Array.isArray((res as any).files)) return (res as any).files;
+    if (res && Array.isArray(res.files)) return res.files;
     return [];
   }
 
+  async statFile(filePath: string, projectPath?: string): Promise<FileStatResponse> {
+    const params = new URLSearchParams({ filePath });
+    if (projectPath) params.set('projectPath', projectPath);
+    return apiRequest<FileStatResponse>(`/api/v1/fs/stat?${params.toString()}`);
+  }
+
   async readFile(req: ReadFileRequest): Promise<ReadFileResponse> {
-    const projectPath = (req as any).projectPath || '';
-    const params = new URLSearchParams({ filePath: req.filePath, path: req.filePath, projectPath, dir: projectPath });
-    return apiRequest<ReadFileResponse>(`/api/v1/fs/read?${params}`);
+    const params = new URLSearchParams({ filePath: req.filePath });
+    if (req.projectPath) params.set('projectPath', req.projectPath);
+    return apiRequest<ReadFileResponse>(`/api/v1/fs/read?${params.toString()}`);
   }
 
   async writeFile(req: WriteFileRequest): Promise<WriteFileResponse> {
     return apiRequest<WriteFileResponse>('/api/v1/fs/write', {
       method: 'POST',
       body: req,
+      retries: 0,
     });
   }
 
@@ -269,6 +392,15 @@ class RealFileSystemService implements IFileSystemService {
     return apiRequest<ProjectFile>('/api/v1/fs/create', {
       method: 'POST',
       body: req,
+      retries: 0,
+    });
+  }
+
+  async renameFile(req: RenameFileRequest): Promise<RenameFileResponse> {
+    return apiRequest<RenameFileResponse>('/api/v1/fs/rename', {
+      method: 'POST',
+      body: req,
+      retries: 0,
     });
   }
 
@@ -276,6 +408,7 @@ class RealFileSystemService implements IFileSystemService {
     return apiRequest<void>('/api/v1/fs/delete', {
       method: 'DELETE',
       body: req,
+      retries: 0,
     });
   }
 }
@@ -286,21 +419,47 @@ class RealFileSystemService implements IFileSystemService {
 
 class RealGitService implements IGitService {
   async getStatus(projectPath: string): Promise<GitStatusResponse> {
-    const params = new URLSearchParams({ projectPath, project: projectPath, dir: projectPath });
-    return apiRequest<GitStatusResponse>(`/api/v1/git/status?${params}`);
+    const params = new URLSearchParams({ projectPath });
+    return apiRequest<GitStatusResponse>(`/api/v1/git/status?${params.toString()}`);
   }
 
-  async stageFiles(files: string[]): Promise<void> {
+  async getBranches(
+    projectPath: string,
+  ): Promise<{ currentBranch: string; branches: string[] }> {
+    const params = new URLSearchParams({ projectPath });
+    return apiRequest<{ currentBranch: string; branches: string[] }>(
+      `/api/v1/git/branches?${params.toString()}`,
+    );
+  }
+
+  async getDiff(
+    projectPath: string,
+    filePath?: string,
+    staged?: boolean,
+  ): Promise<string> {
+    const params = new URLSearchParams({ projectPath });
+    if (filePath) params.set('filePath', filePath);
+    if (staged != null) params.set('staged', String(staged));
+    const res = await apiRequest<{ diff?: string } | string>(
+      `/api/v1/git/diff?${params.toString()}`,
+    );
+    if (typeof res === 'string') return res;
+    return res?.diff || '';
+  }
+
+  async stageFiles(files: string[], projectPath?: string): Promise<void> {
     return apiRequest<void>('/api/v1/git/stage', {
       method: 'POST',
-      body: { files },
+      body: { projectPath, files },
+      retries: 0,
     });
   }
 
-  async unstageFiles(files: string[]): Promise<void> {
+  async unstageFiles(files: string[], projectPath?: string): Promise<void> {
     return apiRequest<void>('/api/v1/git/unstage', {
       method: 'POST',
-      body: { files },
+      body: { projectPath, files },
+      retries: 0,
     });
   }
 
@@ -308,29 +467,37 @@ class RealGitService implements IGitService {
     return apiRequest<GitCommitResponse>('/api/v1/git/commit', {
       method: 'POST',
       body: req,
+      retries: 0,
     });
   }
 
-  async push(branch?: string): Promise<GitPushPullResponse> {
+  async push(branch?: string, projectPath?: string): Promise<GitPushPullResponse> {
     return apiRequest<GitPushPullResponse>('/api/v1/git/push', {
       method: 'POST',
-      body: branch ? { branch } : {},
+      body: { projectPath, ...(branch ? { branch } : {}) },
       timeoutMs: 30_000,
+      retries: 0,
     });
   }
 
-  async pull(branch?: string): Promise<GitPushPullResponse> {
+  async pull(branch?: string, projectPath?: string): Promise<GitPushPullResponse> {
     return apiRequest<GitPushPullResponse>('/api/v1/git/pull', {
       method: 'POST',
-      body: branch ? { branch } : {},
+      body: { projectPath, ...(branch ? { branch } : {}) },
       timeoutMs: 30_000,
+      retries: 0,
     });
   }
 
-  async switchBranch(branchName: string): Promise<void> {
+  async switchBranch(
+    branchName: string,
+    projectPath?: string,
+    createNew: boolean = false,
+  ): Promise<void> {
     return apiRequest<void>('/api/v1/git/checkout', {
       method: 'POST',
-      body: { branch: branchName },
+      body: { projectPath, branchName, createNew },
+      retries: 0,
     });
   }
 }
@@ -341,20 +508,62 @@ class RealGitService implements IGitService {
 
 class RealCliService implements ICliService {
   async listTools(): Promise<AiCliTool[]> {
-    return apiRequest<AiCliTool[]>('/api/v1/cli/tools');
+    const res = await apiRequest<any>('/api/v1/cli/tools');
+    const rawList: any[] = Array.isArray(res) ? res : Array.isArray(res?.tools) ? res.tools : [];
+    return rawList.map((item) => {
+      const installed = Boolean(
+        item.isInstalled ||
+          item.status === 'installed' ||
+          item.status === 'needs_setup' ||
+          item.status === 'running' ||
+          item.executablePath ||
+          item.path,
+      );
+      const authStatus =
+        item.authStatus || (installed ? 'unknown' : 'not_installed');
+      let status: AiCliTool['status'] = installed ? 'installed' : 'unavailable';
+      if (installed && authStatus === 'unauthenticated') {
+        status = 'needs_setup';
+      }
+      return {
+        id: item.id,
+        name: item.name,
+        cliName: item.cliName || item.id,
+        vendor: item.vendor || item.provider || 'CLI Provider',
+        description: item.description || '',
+        status,
+        version: item.version || (installed ? 'Installed' : 'Not Installed'),
+        installCommand: item.installCommand || '',
+        installScope: item.installScope || 'user',
+        runCommand: item.runCommand || item.cliName || item.id,
+        permissionsRequired: Array.isArray(item.permissionsRequired) ? item.permissionsRequired : [],
+        capabilities: Array.isArray(item.capabilities) ? item.capabilities : [],
+        executablePath: item.executablePath || item.path || undefined,
+        authStatus,
+        authDetail: item.authDetail || undefined,
+        launchSupported: item.launchSupported !== false,
+      };
+    });
   }
 
   async installTool(toolId: string): Promise<InstallToolResponse> {
-    return apiRequest<InstallToolResponse>('/api/v1/cli/install', {
+    const res = await apiRequest<any>('/api/v1/cli/install', {
       method: 'POST',
       body: { toolId },
-      timeoutMs: 120_000, // installs can be slow
+      timeoutMs: 120_000,
+      retries: 0,
     });
+    return {
+      toolId: res.toolId || toolId,
+      success: Boolean(res.success),
+      installedVersion: res.installedVersion || res.version || '',
+      outputLog: res.outputLog || '',
+    };
   }
 
   async checkCliStatus(cliName: string): Promise<CliStatusResponse> {
     const params = new URLSearchParams({ name: cliName });
-    return apiRequest<CliStatusResponse>(`/api/v1/cli/check?${params}`);
+    return apiRequest<CliStatusResponse>(`/api/v1/cli/check?${params.toString()}`);
   }
 }
 
@@ -364,13 +573,17 @@ class RealCliService implements ICliService {
 
 class RealPreviewService implements IPreviewService {
   async listDevServers(): Promise<DevServer[]> {
-    return apiRequest<DevServer[]>('/api/v1/preview/servers');
+    const res = await apiRequest<DevServer[] | { ports?: DevServer[] }>('/api/v1/preview/servers');
+    if (Array.isArray(res)) return res;
+    if (res && Array.isArray(res.ports)) return res.ports;
+    return [];
   }
 
-  async startDevServer(command: string, port: number): Promise<DevServer> {
+  async startDevServer(command: string, port: number, workingDir?: string): Promise<DevServer> {
     return apiRequest<DevServer>('/api/v1/preview/servers/start', {
       method: 'POST',
-      body: { command, port },
+      body: { command, port, workingDir },
+      retries: 0,
     });
   }
 
@@ -378,6 +591,7 @@ class RealPreviewService implements IPreviewService {
     return apiRequest<void>('/api/v1/preview/servers/stop', {
       method: 'POST',
       body: { serverId },
+      retries: 0,
     });
   }
 
@@ -386,12 +600,13 @@ class RealPreviewService implements IPreviewService {
       method: 'POST',
       body: { scriptPath },
       timeoutMs: 60_000,
+      retries: 0,
     });
   }
 
   async getDesktopAppStream(appId: string): Promise<DesktopAppStreamInfo> {
     return apiRequest<DesktopAppStreamInfo>(
-      `/api/v1/preview/desktop/${encodeURIComponent(appId)}`,
+      `/api/v1/preview/desktop-stream?appId=${encodeURIComponent(appId)}`,
     );
   }
 }
@@ -419,6 +634,7 @@ class RealSyncService implements ISyncService {
       method: 'POST',
       body: { intentId: id, action },
       timeoutMs: 30_000,
+      retries: 0,
     });
   }
 
@@ -427,11 +643,11 @@ class RealSyncService implements ISyncService {
       method: 'POST',
       body: { forceRun: forceRun ?? false },
       timeoutMs: 120_000,
+      retries: 0,
     });
   }
 
   async triggerCloudFallback(_intentIds: string[]): Promise<CloudExecutionResponse> {
-    // Cloud execution is explicitly deferred for MVP
     throw new ApiError(
       'Cloud execution is not available in the current release. All operations run on the local PC.',
       501,

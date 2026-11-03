@@ -1,39 +1,65 @@
 """
-Lazy Terminal — Windows PC Companion Desktop Application (Tkinter)
+Lazy Terminal — Windows PC Companion Desktop Application (Tkinter Glass Effect Theme)
 
-Theme strictly follows the supplied Lazy Terminal web frontend:
-- Background: #07080a / #14161c
-- Cards: #1a1d24
-- Inner panels: #121418
-- Borders: #282d38
-- Accent colors: Emerald (#10b981), Amber (#f59e0b), Blue (#3b82f6)
-
-Behavior:
-1. When opened, it displays the randomly generated pairing token ONLY (clean, uncluttered).
-2. Once connected (via real mobile pairing over local LAN or simulation/test),
-   it reveals the Sync Manager, Server Control, and real-time host telemetry.
+Delegates all HTTP / PTY / Filesystem / Git / AI CLI operations to the real
+Windows Host Companion (`src/host/companionServer.ts`) so pairing, PowerShell,
+Explorer, Git, and CLI sessions share one authenticated host runtime.
 """
 
-import sys
+import argparse
+import atexit
+import ctypes
+import json
 import os
-import random
+import shutil
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
-import json
-import urllib.request
 import urllib.error
-import tkinter as tk
-from tkinter import ttk, messagebox
+import urllib.request
 
-# Windows 11 / 10 Dark Mode Titlebar support
+try:
+    import tkinter as tk
+    from tkinter import ttk
+except Exception:
+    tk = None
+    ttk = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFilter = None
+    ImageTk = None
+
+
+def get_repo_root():
+    if "__file__" in globals():
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
+def get_resource_path(relative_path):
+    if hasattr(sys, "_MEIPASS"):
+        p = os.path.join(sys._MEIPASS, relative_path)
+        if os.path.exists(p):
+            return p
+    candidate = os.path.join(get_repo_root(), relative_path)
+    if os.path.exists(candidate):
+        return candidate
+    if os.path.exists(relative_path):
+        return os.path.abspath(relative_path)
+    return None
+
+
 def enable_windows_dark_titlebar(window):
     try:
-        import ctypes
         window.update()
-        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-        if not hwnd:
-            hwnd = window.winfo_id()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(2)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -46,448 +72,596 @@ def enable_windows_dark_titlebar(window):
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.2)
-        s.connect(('8.8.8.8', 80))
+        s.settimeout(0.3)
+        s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
     except Exception:
-        return '127.0.0.1'
+        return "127.0.0.1"
 
 
-INITIAL_SYNCS = [
-    {
-        "id": "SYNC-REQ-104",
-        "timestamp": "2026-10-24 22:01:15",
-        "time_ago": "2 mins ago",
-        "items": 3,
-        "summary": "Offline intent queue flushed & causal graph synced with host",
-        "head_commit": "3f7a8b1",
-    },
-    {
-        "id": "SYNC-REQ-103",
-        "timestamp": "2026-10-24 21:45:22",
-        "time_ago": "18 mins ago",
-        "items": 2,
-        "summary": "Workspace file tree & dirty state synced across tunnel",
-        "head_commit": "3f7a8b1",
-    },
-    {
-        "id": "SYNC-REQ-102",
-        "timestamp": "2026-10-24 20:58:04",
-        "time_ago": "1 hour ago",
-        "items": 5,
-        "summary": "Branch checkout and remote ref synchronization",
-        "head_commit": "a9c210d",
-    },
-]
+def is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
+
+def local_api_json(port: int, path: str, method: str = "GET", payload: dict = None, timeout: float = 3.0):
+    url = f"http://127.0.0.1:{port}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+class HostBackendProcessManager:
+    """Starts and manages the real Node/TypeScript Windows Host Companion."""
+
+    def __init__(self, preferred_port: int = 3000):
+        self.preferred_port = preferred_port
+        self.port = preferred_port
+        self.proc = None
+        self.owns_process = False
+        atexit.register(self.stop)
+
+    def start(self) -> int:
+        # Reuse already-running Lazy Terminal host companion if listening on preferred_port
+        try:
+            health = local_api_json(self.preferred_port, "/health", timeout=1.0)
+            if health.get("status") == "ok" and health.get("service") == "lazy-terminal-host-companion":
+                self.port = self.preferred_port
+                self.owns_process = False
+                return self.port
+        except Exception:
+            pass
+
+        candidate_ports = [self.preferred_port, 9871, 3000, 3001, 8080]
+        chosen_port = None
+        for p in dict.fromkeys(candidate_ports):
+            if is_port_free(p):
+                chosen_port = p
+                break
+        if chosen_port is None:
+            raise RuntimeError("No available TCP port found for Lazy Terminal Host Companion.")
+
+        self.port = chosen_port
+        repo_root = get_repo_root()
+        node_bin = shutil.which("node") or "node"
+        companion_entry = os.path.join(repo_root, "src", "host", "companionServer.ts")
+
+        env = os.environ.copy()
+        env["LAZY_TERMINAL_HOST_PORT"] = str(self.port)
+        env["LAZY_TERMINAL_HOST_BIND"] = env.get("LAZY_TERMINAL_HOST_BIND", "0.0.0.0")
+
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
+        self.proc = subprocess.Popen(
+            [node_bin, "--import", "tsx", companion_entry],
+            cwd=repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=creationflags,
+        )
+        self.owns_process = True
+
+        # Drain stdout in background so pipe never blocks
+        def _drain():
+            if not self.proc or not self.proc.stdout:
+                return
+            for line in self.proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        threading.Thread(target=_drain, daemon=True).start()
+
+        # Wait until /health responds
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"Host companion exited prematurely with code {self.proc.returncode}")
+            try:
+                health = local_api_json(self.port, "/health", timeout=1.0)
+                if health.get("status") == "ok":
+                    return self.port
+            except Exception:
+                time.sleep(0.25)
+
+        raise RuntimeError(f"Timed out waiting for Windows Host Companion on port {self.port}")
+
+    def stop(self):
+        if not self.owns_process or not self.proc:
+            return
+        proc = self.proc
+        self.proc = None
+        if proc.poll() is None:
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                else:
+                    proc.terminate()
+            except Exception:
+                pass
 
 
 class LazyTerminalCompanionApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root, backend_manager: HostBackendProcessManager):
         self.root = root
-        self.root.title("Lazy Terminal — Windows PC Companion")
-        self.root.geometry("740x590")
-        self.root.minsize(680, 520)
-        self.root.configure(bg="#0e1117")
+        self.backend = backend_manager
+        self.root.title("Lazy Terminal — Windows PC Host Companion")
+        self.root.geometry("820x620")
+        self.root.minsize(760, 560)
+        self.root.configure(bg="#090d16")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         enable_windows_dark_titlebar(self.root)
 
-        # State
-        self.hostname = os.environ.get("COMPUTERNAME", "DESKTOP-WIN11-PRO")
+        self.hostname = socket.gethostname()
         self.local_ip = get_local_ip()
-        self.host_port = 3000
-        self.pairing_token = self.generate_random_token()
+        self.host_port = self.backend.port
+        self.pairing_token = "--- ---"
+        self.active_workspace = os.getcwd()
         self.is_connected = False
         self.is_server_running = True
-        self.sync_records = list(INITIAL_SYNCS)
-        self.selected_sync_id = self.sync_records[0]["id"]
-        self.is_syncing = False
+        self.intents_processed = 0
         self.toast_message = ""
         self.toast_timer = None
-        self.poll_active = True
 
-        # Styles
+        self.icon_photo = None
+        self.bg_photo = None
+        self.prepare_images()
         self.setup_styles()
 
-        # Layout containers
+        self.main_container = None
         self.header_frame = None
         self.toast_frame = None
-        self.main_container = None
+        self.content_frame = None
         self.footer_frame = None
 
-        # Build initial UI
+        self.refresh_from_backend(initial=True)
         self.build_ui()
+        self.schedule_poll()
 
-        # Start background sync thread to poll local node companion if active
-        self.poll_thread = threading.Thread(target=self.background_poll_loop, daemon=True)
-        self.poll_thread.start()
+    def on_close(self):
+        self.backend.stop()
+        self.root.destroy()
 
-    def generate_random_token(self) -> str:
-        p1 = random.randint(100, 999)
-        p2 = random.randint(100, 999)
-        return f"{p1}-{p2}"
+    def prepare_images(self):
+        if Image is None or ImageTk is None:
+            return
+        icon_path = get_resource_path("icon.jpeg") or get_resource_path("public/downloads/icon.jpeg")
+        raw_icon = None
+        if icon_path and os.path.exists(icon_path):
+            try:
+                raw_icon = Image.open(icon_path).convert("RGBA")
+            except Exception:
+                raw_icon = None
+
+        if raw_icon is None:
+            raw_icon = Image.new("RGBA", (192, 192), (37, 99, 235, 255))
+            d = ImageDraw.Draw(raw_icon)
+            d.rectangle([(20, 20), (172, 172)], fill=(56, 189, 248, 255))
+
+        icon_size = (72, 72)
+        resized_icon = raw_icon.resize(icon_size, Image.Resampling.LANCZOS)
+        mask = Image.new("L", icon_size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle([(0, 0), icon_size], radius=16, fill=255)
+        resized_icon.putalpha(mask)
+
+        icon_with_border = Image.new("RGBA", (76, 76), (0, 0, 0, 0))
+        border_draw = ImageDraw.Draw(icon_with_border)
+        border_draw.rounded_rectangle(
+            [(0, 0), (75, 75)],
+            radius=18,
+            fill=(30, 41, 59, 220),
+            outline=(56, 189, 248, 200),
+            width=2,
+        )
+        icon_with_border.paste(resized_icon, (2, 2), resized_icon)
+        self.icon_photo = ImageTk.PhotoImage(icon_with_border)
+
+        W, H = 840, 640
+        bg = Image.new("RGBA", (W, H), (9, 13, 22, 255))
+        try:
+            watermark = raw_icon.resize((380, 380), Image.Resampling.LANCZOS)
+            watermark = watermark.filter(ImageFilter.GaussianBlur(32))
+            r, g, b, a = watermark.split()
+            a = a.point(lambda p: int(p * 0.14))
+            watermark.putalpha(a)
+            bg.paste(watermark, (W - 320, -60), watermark)
+
+            left_glow = Image.new("RGBA", (280, 280), (14, 165, 233, 25))
+            left_glow = left_glow.filter(ImageFilter.GaussianBlur(40))
+            bg.paste(left_glow, (-80, 160), left_glow)
+        except Exception:
+            pass
+        self.bg_photo = ImageTk.PhotoImage(bg)
 
     def setup_styles(self):
-        style = ttk.Style()
-        style.theme_use('default')
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(".", background="#090d16", foreground="#f8fafc")
+        style.configure("TFrame", background="#090d16")
+        style.configure("Glass.TFrame", background="#121622")
+        style.configure("TLabel", background="#090d16", foreground="#f8fafc", font=("Segoe UI", 9))
 
-        # Combobox dark style
-        style.configure(
-            "TCombobox",
-            fieldbackground="#121418",
-            background="#1a1d24",
-            foreground="#f4f4f5",
-            bordercolor="#282d38",
-            arrowcolor="#94a3b8",
-            padding=4,
-        )
-        style.map(
-            "TCombobox",
-            fieldbackground=[("readonly", "#121418")],
-            selectbackground=[("readonly", "#1f2430")],
-            selectforeground=[("readonly", "#ffffff")],
-        )
+    def refresh_from_backend(self, initial: bool = False):
+        changed = False
+        try:
+            status = local_api_json(self.host_port, "/api/v1/host/local-status", timeout=1.5)
+            new_token = status.get("pairingToken") or self.pairing_token
+            new_running = status.get("backendServerStatus") == "running"
+            new_connected = status.get("tunnelStatus") == "active"
+            new_ws = status.get("activeWorkspaceRoot") or self.active_workspace
+            new_count = int(status.get("totalIntentsProcessed") or 0)
+
+            if (
+                new_token != self.pairing_token
+                or new_running != self.is_server_running
+                or new_connected != self.is_connected
+                or new_ws != self.active_workspace
+                or new_count != self.intents_processed
+            ):
+                changed = True
+                self.pairing_token = new_token
+                self.is_server_running = new_running
+                self.is_connected = new_connected
+                self.active_workspace = new_ws
+                self.intents_processed = new_count
+        except Exception:
+            pass
+
+        if changed and not initial:
+            self.build_ui()
+
+    def schedule_poll(self):
+        self.refresh_from_backend()
+        self.root.after(1500, self.schedule_poll)
 
     def build_ui(self):
-        # Clear previous widgets
-        for widget in self.root.winfo_children():
-            widget.destroy()
+        for w in self.root.winfo_children():
+            w.destroy()
 
-        # 1. Desktop Window Frame Header (#14161b)
-        self.header_frame = tk.Frame(self.root, bg="#14161b", height=42, highlightthickness=1, highlightbackground="#252830")
-        self.header_frame.pack(fill=tk.X, side=tk.TOP)
-        self.header_frame.pack_propagate(False)
+        bg_canvas = tk.Canvas(self.root, width=820, height=620, highlightthickness=0, bg="#090d16")
+        bg_canvas.pack(fill=tk.BOTH, expand=True)
+        if self.bg_photo:
+            bg_canvas.create_image(0, 0, image=self.bg_photo, anchor="nw")
+        bg_canvas.create_line(0, 0, 1200, 0, fill="#38bdf8", width=3)
 
-        # Header Left: [W] Badge + Name + Hostname
-        header_left = tk.Frame(self.header_frame, bg="#14161b")
-        header_left.pack(side=tk.LEFT, padx=14, pady=8)
+        self.main_container = tk.Frame(bg_canvas, bg="#090d16", bd=0)
+        self.main_container.place(relx=0.5, rely=0.5, anchor="center", width=780, height=580)
 
-        w_badge = tk.Label(
-            header_left, text=" W ", bg="#1f232b", fg="#e2e8f0",
-            font=("Consolas", 9, "bold"), bd=1, relief="solid", highlightthickness=0
+        self.header_frame = tk.Frame(
+            self.main_container, bg="#0e131f", bd=1, relief="solid", highlightbackground="#1e293b", padx=16, pady=12
         )
-        w_badge.pack(side=tk.LEFT, padx=(0, 8))
+        self.header_frame.pack(fill=tk.X, pady=(0, 10))
 
-        title_label = tk.Label(
-            header_left, text="Relay Desktop Host — Windows",
-            bg="#14161b", fg="#f1f5f9", font=("Segoe UI", 10, "bold")
-        )
-        title_label.pack(side=tk.LEFT, padx=(0, 6))
+        if self.icon_photo:
+            icon_lbl = tk.Label(self.header_frame, image=self.icon_photo, bg="#0e131f")
+            icon_lbl.pack(side=tk.LEFT, padx=(0, 14))
 
-        host_label = tk.Label(
-            header_left, text=f"({self.hostname})",
-            bg="#14161b", fg="#64748b", font=("Consolas", 9)
-        )
-        host_label.pack(side=tk.LEFT)
+        title_box = tk.Frame(self.header_frame, bg="#0e131f")
+        title_box.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Header Right: Status indicator pill
-        header_right = tk.Frame(self.header_frame, bg="#14161b")
-        header_right.pack(side=tk.RIGHT, padx=14, pady=8)
+        tk.Label(
+            title_box, text="LAZY TERMINAL", bg="#0e131f", fg="#ffffff", font=("Segoe UI", 16, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            title_box,
+            text="Windows PC Host Companion • Local-First Authenticated Dev Host",
+            bg="#0e131f",
+            fg="#38bdf8",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(1, 0))
 
-        if self.is_connected:
-            status_text = "● CONNECTED (TUNNEL ACTIVE)"
-            status_fg = "#34d399"
-            status_bg = "#064e3b"
-        else:
-            status_text = "● WAITING FOR MOBILE"
-            status_fg = "#fbbf24"
-            status_bg = "#451a03"
+        h_right = tk.Frame(self.header_frame, bg="#0e131f")
+        h_right.pack(side=tk.RIGHT, fill=tk.Y)
 
-        status_pill = tk.Label(
-            header_right, text=f" {status_text} ",
-            bg=status_bg, fg=status_fg, font=("Segoe UI", 8, "bold"),
-            padx=8, pady=2, bd=1, relief="solid"
-        )
-        status_pill.pack(side=tk.RIGHT)
+        status_text = "● CONNECTED" if self.is_connected else "● STANDBY"
+        status_fg = "#34d399" if self.is_connected else "#fbbf24"
+        status_bg = "#064e3b" if self.is_connected else "#2b1e06"
 
-        # 2. Main Content Canvas/Container (#14161c)
-        self.main_container = tk.Frame(self.root, bg="#14161c", padx=24, pady=20)
-        self.main_container.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            h_right,
+            text=f" {status_text} ",
+            bg=status_bg,
+            fg=status_fg,
+            font=("Consolas", 9, "bold"),
+            bd=1,
+            relief="solid",
+            highlightbackground=status_fg,
+        ).pack(anchor="e", pady=(2, 4))
 
-        # Optional Toast message
+        tk.Label(
+            h_right,
+            text=f"Host: {self.local_ip}:{self.host_port}",
+            bg="#0e131f",
+            fg="#94a3b8",
+            font=("Consolas", 8),
+        ).pack(anchor="e")
+
         if self.toast_message:
-            toast_box = tk.Frame(self.main_container, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669")
-            toast_box.pack(fill=tk.X, pady=(0, 12))
-            t_lbl = tk.Label(toast_box, text=f"✓  {self.toast_message}", bg="#064e3b", fg="#6ee7b7", font=("Segoe UI", 9, "bold"), pady=6, padx=10)
-            t_lbl.pack(side=tk.LEFT)
+            self.toast_frame = tk.Frame(
+                self.main_container, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=12, pady=6
+            )
+            self.toast_frame.pack(fill=tk.X, pady=(0, 8))
+            tk.Label(
+                self.toast_frame,
+                text=f"✓  {self.toast_message}",
+                bg="#064e3b",
+                fg="#ecfdf5",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(side=tk.LEFT)
+
+        self.content_frame = tk.Frame(self.main_container, bg="#090d16")
+        self.content_frame.pack(fill=tk.BOTH, expand=True)
 
         if not self.is_connected:
-            self.render_unconnected_view()
+            self.render_token_standby_view()
         else:
             self.render_connected_view()
 
-        # 3. Footer Strip
-        self.footer_frame = tk.Frame(self.root, bg="#16181f", height=36, highlightthickness=1, highlightbackground="#242833")
-        self.footer_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        self.footer_frame.pack_propagate(False)
-
-        footer_left = tk.Label(
-            self.footer_frame, text="🔒 Ed25519 Mutual TLS Verification Active",
-            bg="#16181f", fg="#34d399", font=("Consolas", 8, "bold")
+        self.footer_frame = tk.Frame(
+            self.main_container, bg="#0c1018", bd=1, relief="solid", highlightbackground="#1b2434", padx=12, pady=6
         )
-        footer_left.pack(side=tk.LEFT, padx=16, pady=6)
+        self.footer_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
 
-        footer_right = tk.Label(
+        tk.Label(
             self.footer_frame,
-            text=f"Daemon: v1.4.0  •  Host IP: {self.local_ip}:{self.host_port}  •  OS: Windows 11 x64",
-            bg="#16181f", fg="#64748b", font=("Consolas", 8)
+            text=f"Workspace: {self.active_workspace}",
+            bg="#0c1018",
+            fg="#64748b",
+            font=("Consolas", 8),
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            self.footer_frame,
+            text=f"LAN: {self.local_ip}:{self.host_port}  •  Host: {self.hostname}",
+            bg="#0c1018",
+            fg="#64748b",
+            font=("Consolas", 8),
+        ).pack(side=tk.RIGHT)
+
+    def render_token_standby_view(self):
+        card = tk.Frame(
+            self.content_frame, bg="#121724", bd=1, relief="solid", highlightbackground="#243147", padx=28, pady=24
         )
-        footer_right.pack(side=tk.RIGHT, padx=16, pady=6)
+        card.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-    def render_unconnected_view(self):
-        """
-        Unconnected View:
-        Shows the randomly generated token ONLY, with the theme following the frontend provided.
-        """
-        # Centered container frame
-        center_wrap = tk.Frame(self.main_container, bg="#14161c")
-        center_wrap.pack(expand=True, fill=tk.BOTH, pady=10)
+        c_top = tk.Frame(card, bg="#121724")
+        c_top.pack(fill=tk.X, pady=(0, 16))
 
-        # Token Window Card
-        card = tk.Frame(center_wrap, bg="#1a1d24", bd=1, relief="solid", highlightbackground="#282d38")
-        card.pack(fill=tk.X, padx=10, pady=10)
+        tk.Label(
+            c_top, text="AUTHENTICATION KEY", bg="#121724", fg="#38bdf8", font=("Segoe UI", 9, "bold")
+        ).pack(side=tk.LEFT)
 
-        # Card Header: Key Icon + Token Window + Backend Bound
-        card_header = tk.Frame(card, bg="#15181f", height=32, highlightthickness=1, highlightbackground="#242833")
-        card_header.pack(fill=tk.X)
-        card_header.pack_propagate(False)
+        tk.Label(
+            c_top,
+            text="● WAITING FOR MOBILE PAIRING",
+            bg="#2a1e06",
+            fg="#fbbf24",
+            font=("Consolas", 8, "bold"),
+            padx=8,
+            pady=2,
+            bd=1,
+            relief="solid",
+        ).pack(side=tk.RIGHT)
 
-        lbl_head_left = tk.Label(
-            card_header, text="🔑 Token Window",
-            bg="#15181f", fg="#f1f5f9", font=("Segoe UI", 9, "bold")
+        token_container = tk.Frame(
+            card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1c273b", padx=24, pady=20
         )
-        lbl_head_left.pack(side=tk.LEFT, padx=12, pady=4)
+        token_container.pack(fill=tk.X, pady=(0, 16))
 
-        lbl_head_right = tk.Label(
-            card_header, text="Backend Bound",
-            bg="#15181f", fg="#64748b", font=("Consolas", 8)
+        tk.Label(
+            token_container, text="Active Pairing Code", bg="#080c14", fg="#94a3b8", font=("Segoe UI", 10)
+        ).pack(anchor="center", pady=(0, 6))
+
+        tk.Label(
+            token_container,
+            text=self.pairing_token,
+            bg="#080c14",
+            fg="#38bdf8",
+            font=("Consolas", 34, "bold"),
+        ).pack(anchor="center", pady=(2, 6))
+
+        actions_bar = tk.Frame(token_container, bg="#080c14")
+        actions_bar.pack(anchor="center", pady=(6, 0))
+
+        tk.Button(
+            actions_bar,
+            text="📋 Copy Code",
+            bg="#1e293b",
+            fg="#f8fafc",
+            activebackground="#334155",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            bd=1,
+            relief="solid",
+            highlightbackground="#38bdf8",
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self.handle_copy_token,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            actions_bar,
+            text="🔄 Rotate Key",
+            bg="#131b2c",
+            fg="#38bdf8",
+            activebackground="#1e293b",
+            activeforeground="#38bdf8",
+            font=("Segoe UI", 9),
+            bd=1,
+            relief="solid",
+            highlightbackground="#223352",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.handle_regenerate_token,
+        ).pack(side=tk.LEFT)
+
+        lan_card = tk.Frame(
+            card, bg="#0c111c", bd=1, relief="solid", highlightbackground="#1c273b", padx=16, pady=12
         )
-        lbl_head_right.pack(side=tk.RIGHT, padx=12, pady=4)
+        lan_card.pack(fill=tk.X, pady=(6, 0))
 
-        # Card Body
-        card_body = tk.Frame(card, bg="#1a1d24", padx=20, pady=18)
-        card_body.pack(fill=tk.X)
+        tk.Label(
+            lan_card,
+            text="📱 Connecting Your Phone Over Local Wi-Fi:",
+            bg="#0c111c",
+            fg="#e2e8f0",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
 
-        lbl_subtitle = tk.Label(
-            card_body, text="RANDOM TOKEN NUMBER",
-            bg="#1a1d24", fg="#94a3b8", font=("Segoe UI", 8, "bold")
-        )
-        lbl_subtitle.pack(anchor="w")
+        tk.Label(
+            lan_card,
+            text=(
+                "1. Ensure your Android phone is on the same Wi-Fi.\n"
+                "2. Open Lazy Terminal on Android, set Host URL below, and enter the pairing code.\n"
+                f"3. Host LAN URL: http://{self.local_ip}:{self.host_port}"
+            ),
+            bg="#0c111c",
+            fg="#94a3b8",
+            font=("Segoe UI", 9),
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 6))
 
-        # Huge Monospace Token
-        token_lbl = tk.Label(
-            card_body, text=self.pairing_token,
-            bg="#1a1d24", fg="#ffffff", font=("Consolas", 32, "bold"), pady=6
-        )
-        token_lbl.pack(anchor="w")
-
-        lbl_desc = tk.Label(
-            card_body,
-            text="Dynamic pairing token. Enter this 6-digit code on the Lazy Terminal mobile app to connect.",
-            bg="#1a1d24", fg="#64748b", font=("Segoe UI", 9)
-        )
-        lbl_desc.pack(anchor="w", pady=(0, 14))
-
-        # Button Controls row
-        btn_row = tk.Frame(card_body, bg="#1a1d24")
-        btn_row.pack(fill=tk.X, pady=(4, 0))
-
-        copy_btn = tk.Button(
-            btn_row, text="📋 Copy Token", bg="#242936", fg="#f1f5f9",
-            activebackground="#333b4e", activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"), padx=14, pady=6, bd=1, relief="solid",
-            cursor="hand2", command=self.handle_copy_token
-        )
-        copy_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        refresh_btn = tk.Button(
-            btn_row, text="🔄 Generate New Token", bg="#242936", fg="#cbd5e1",
-            activebackground="#333b4e", activeforeground="#ffffff",
-            font=("Segoe UI", 9), padx=12, pady=6, bd=1, relief="solid",
-            cursor="hand2", command=self.handle_regenerate_token
-        )
-        refresh_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        sim_btn = tk.Button(
-            btn_row, text="📱 Simulate Mobile Connect", bg="#2563eb", fg="#ffffff",
-            activebackground="#1d4ed8", activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"), padx=14, pady=6, bd=0,
-            cursor="hand2", command=self.handle_simulate_connect
-        )
-        sim_btn.pack(side=tk.RIGHT)
-
-        # Standby status guide banner
-        guide_box = tk.Frame(center_wrap, bg="#121418", bd=1, relief="solid", highlightbackground="#222630", padx=16, pady=16)
-        guide_box.pack(fill=tk.X, padx=10, pady=12)
-
-        g_title = tk.Label(
-            guide_box, text="⏳ Host Standby — Ready to Pair",
-            bg="#121418", fg="#fbbf24", font=("Segoe UI", 10, "bold")
-        )
-        g_title.pack(anchor="w", pady=(0, 4))
-
-        g_desc = tk.Label(
-            guide_box,
-            text="Open the Lazy Terminal app on Android and enter the pairing token displayed above.\nOnce connected, the Sync Manager, Server Control, and live intent synchronization will activate.",
-            bg="#121418", fg="#94a3b8", font=("Segoe UI", 9), justify=tk.LEFT
-        )
-        g_desc.pack(anchor="w")
+        tk.Button(
+            lan_card,
+            text=f"📋 Copy Host URL (http://{self.local_ip}:{self.host_port})",
+            bg="#172033",
+            fg="#38bdf8",
+            activebackground="#1e293b",
+            font=("Consolas", 8, "bold"),
+            bd=1,
+            relief="solid",
+            highlightbackground="#283a5e",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=self.handle_copy_host_url,
+        ).pack(anchor="w")
 
     def render_connected_view(self):
-        """
-        Connected View:
-        Once connected, the Sync Manager, Server Control, and telemetry are shown.
-        """
-        # 1. Connected Notification Banner
-        banner = tk.Frame(self.main_container, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=14, pady=8)
-        banner.pack(fill=tk.X, pady=(0, 14))
-
-        b_left = tk.Label(
-            banner, text="● Device Connected: Android Mobile Client (Ed25519 Tunnel Active)",
-            bg="#064e3b", fg="#6ee7b7", font=("Segoe UI", 9, "bold")
+        banner = tk.Frame(
+            self.content_frame, bg="#064e3b", bd=1, relief="solid", highlightbackground="#059669", padx=14, pady=10
         )
-        b_left.pack(side=tk.LEFT)
+        banner.pack(fill=tk.X, pady=(0, 10))
 
-        b_disc = tk.Button(
-            banner, text="Disconnect", bg="#1a1d24", fg="#cbd5e1",
-            activebackground="#252a36", activeforeground="#ffffff",
-            font=("Segoe UI", 8, "bold"), padx=10, pady=2, bd=1, relief="solid",
-            cursor="hand2", command=self.handle_disconnect
+        tk.Label(
+            banner,
+            text=f"✓  MOBILE DEVICE PAIRED OVER LOCAL LAN — Port {self.host_port}",
+            bg="#064e3b",
+            fg="#ecfdf5",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            banner,
+            text="Rotate Key & Disconnect",
+            bg="#991b1b",
+            fg="#fee2e2",
+            activebackground="#b91c1c",
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self.handle_disconnect,
+        ).pack(side=tk.RIGHT)
+
+        srv_card = tk.Frame(
+            self.content_frame, bg="#101522", bd=1, relief="solid", highlightbackground="#1f2a3d", padx=16, pady=14
         )
-        b_disc.pack(side=tk.RIGHT)
+        srv_card.pack(fill=tk.BOTH, expand=True)
 
-        # 2. Compact Active Token Bar
-        token_bar = tk.Frame(self.main_container, bg="#1a1d24", bd=1, relief="solid", highlightbackground="#282d38", padx=14, pady=8)
-        token_bar.pack(fill=tk.X, pady=(0, 14))
-
-        tb_left = tk.Label(
-            token_bar, text=f"🔑 Active Paired Token:  {self.pairing_token}",
-            bg="#1a1d24", fg="#ffffff", font=("Consolas", 10, "bold")
-        )
-        tb_left.pack(side=tk.LEFT)
-
-        tb_copy = tk.Button(
-            token_bar, text="Copy", bg="#242936", fg="#cbd5e1",
-            font=("Segoe UI", 8), padx=8, pady=2, bd=1, relief="solid",
-            cursor="hand2", command=self.handle_copy_token
-        )
-        tb_copy.pack(side=tk.RIGHT)
-
-        # 3. Two-Column Dashboard: Server Control (Left) & Sync Manager (Right)
-        dash_grid = tk.Frame(self.main_container, bg="#14161c")
-        dash_grid.pack(fill=tk.BOTH, expand=True)
-
-        dash_grid.columnconfigure(0, weight=4)
-        dash_grid.columnconfigure(1, weight=6)
-
-        # --- LEFT: Server Control Window ---
-        srv_card = tk.Frame(dash_grid, bg="#1a1d24", bd=1, relief="solid", highlightbackground="#282d38", padx=14, pady=12)
-        srv_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-
-        # Title
-        sc_title_row = tk.Frame(srv_card, bg="#1a1d24")
+        sc_title_row = tk.Frame(srv_card, bg="#101522")
         sc_title_row.pack(fill=tk.X, pady=(0, 10))
 
-        sc_title = tk.Label(sc_title_row, text="🖥️ Server Control", bg="#1a1d24", fg="#f1f5f9", font=("Segoe UI", 10, "bold"))
-        sc_title.pack(side=tk.LEFT)
+        tk.Label(
+            sc_title_row, text="⚡ Live Host Runtime Status", bg="#101522", fg="#ffffff", font=("Segoe UI", 10, "bold")
+        ).pack(side=tk.LEFT)
 
         status_text = "RUNNING" if self.is_server_running else "STOPPED"
         status_color = "#34d399" if self.is_server_running else "#f87171"
         status_bg = "#064e3b" if self.is_server_running else "#450a0a"
 
-        sc_status = tk.Label(sc_title_row, text=f" {status_text} ", bg=status_bg, fg=status_color, font=("Consolas", 8, "bold"))
-        sc_status.pack(side=tk.RIGHT)
+        tk.Label(
+            sc_title_row,
+            text=f" {status_text} ",
+            bg=status_bg,
+            fg=status_color,
+            font=("Consolas", 8, "bold"),
+            bd=1,
+            relief="solid",
+        ).pack(side=tk.RIGHT)
 
-        # Metrics box
-        metrics_box = tk.Frame(srv_card, bg="#121418", bd=1, relief="solid", highlightbackground="#222630", padx=10, pady=8)
-        metrics_box.pack(fill=tk.X, pady=(0, 14))
-
-        m1 = tk.Label(metrics_box, text=f"Local Port:  {self.host_port} (TCP TLS)", bg="#121418", fg="#94a3b8", font=("Consolas", 9))
-        m1.pack(anchor="w")
-        m2 = tk.Label(metrics_box, text=f"Host LAN IP: {self.local_ip}", bg="#121418", fg="#94a3b8", font=("Consolas", 9))
-        m2.pack(anchor="w")
-
-        # Toggle button
-        srv_btn_text = "⏹ Stop Server" if self.is_server_running else "▶ Start Server"
-        srv_btn_bg = "#e11d48" if self.is_server_running else "#059669"
-
-        srv_toggle_btn = tk.Button(
-            srv_card, text=srv_btn_text, bg=srv_btn_bg, fg="#ffffff",
-            activebackground=srv_btn_bg, activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"), pady=6, bd=0, cursor="hand2",
-            command=self.handle_toggle_server
+        metrics_box = tk.Frame(
+            srv_card, bg="#080c14", bd=1, relief="solid", highlightbackground="#1b2436", padx=12, pady=10
         )
-        srv_toggle_btn.pack(fill=tk.X, side=tk.BOTTOM)
+        metrics_box.pack(fill=tk.X, pady=(0, 12))
 
-        # --- RIGHT: Sync Manager Window ---
-        sync_card = tk.Frame(dash_grid, bg="#1a1d24", bd=1, relief="solid", highlightbackground="#282d38", padx=14, pady=12)
-        sync_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        tk.Label(
+            metrics_box,
+            text=f"Host Endpoint:     http://{self.local_ip}:{self.host_port}",
+            bg="#080c14",
+            fg="#94a3b8",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
+        tk.Label(
+            metrics_box,
+            text=f"Active Workspace:  {self.active_workspace}",
+            bg="#080c14",
+            fg="#38bdf8",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
+        tk.Label(
+            metrics_box,
+            text=f"Commands Executed: {self.intents_processed}",
+            bg="#080c14",
+            fg="#34d399",
+            font=("Consolas", 9),
+        ).pack(anchor="w")
 
-        # Title
-        sync_title_row = tk.Frame(sync_card, bg="#1a1d24")
-        sync_title_row.pack(fill=tk.X, pady=(0, 10))
+        srv_btn_text = "⏹ Stop Host Service" if self.is_server_running else "▶ Start Host Service"
+        srv_btn_bg = "#b91c1c" if self.is_server_running else "#059669"
 
-        sync_title = tk.Label(sync_title_row, text="🔄 Sync Manager", bg="#1a1d24", fg="#f1f5f9", font=("Segoe UI", 10, "bold"))
-        sync_title.pack(side=tk.LEFT)
+        tk.Button(
+            srv_card,
+            text=srv_btn_text,
+            bg=srv_btn_bg,
+            fg="#ffffff",
+            activebackground=srv_btn_bg,
+            font=("Segoe UI", 9, "bold"),
+            pady=6,
+            bd=0,
+            cursor="hand2",
+            command=self.handle_toggle_server,
+        ).pack(fill=tk.X, side=tk.BOTTOM)
 
-        sync_count = tk.Label(sync_title_row, text=f"{len(self.sync_records)} sync records", bg="#1a1d24", fg="#64748b", font=("Consolas", 8))
-        sync_count.pack(side=tk.RIGHT)
-
-        # Sync Action Controls (Sync Request Button + Dropdown)
-        action_row = tk.Frame(sync_card, bg="#1a1d24")
-        action_row.pack(fill=tk.X, pady=(0, 12))
-
-        sync_btn = tk.Button(
-            action_row, text="⚡ Sync Request" if not self.is_syncing else "⏳ Syncing...",
-            bg="#2563eb", fg="#ffffff", activebackground="#1d4ed8", activeforeground="#ffffff",
-            font=("Segoe UI", 9, "bold"), padx=12, pady=5, bd=0, cursor="hand2",
-            state=tk.DISABLED if self.is_syncing else tk.NORMAL,
-            command=self.handle_sync_request
-        )
-        sync_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        # Combobox of previous syncs
-        sync_values = [f"{s['id']}  •  {s['time_ago']}" for s in self.sync_records]
-        self.sync_combo = ttk.Combobox(action_row, values=sync_values, state="readonly", style="TCombobox")
-        self.sync_combo.current(0)
-        self.sync_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.sync_combo.bind("<<ComboboxSelected>>", self.handle_select_sync)
-
-        # Selected Sync Details Display
-        curr_sync = next((s for s in self.sync_records if s["id"] == self.selected_sync_id), self.sync_records[0])
-        details_box = tk.Frame(sync_card, bg="#121418", bd=1, relief="solid", highlightbackground="#222630", padx=12, pady=10)
-        details_box.pack(fill=tk.BOTH, expand=True)
-
-        d_head = tk.Frame(details_box, bg="#121418")
-        d_head.pack(fill=tk.X, pady=(0, 4))
-
-        d_id = tk.Label(d_head, text=curr_sync["id"], bg="#121418", fg="#f1f5f9", font=("Consolas", 9, "bold"))
-        d_id.pack(side=tk.LEFT)
-
-        d_time = tk.Label(d_head, text=curr_sync["timestamp"], bg="#121418", fg="#64748b", font=("Consolas", 8))
-        d_time.pack(side=tk.RIGHT)
-
-        d_summary = tk.Label(
-            details_box, text=curr_sync["summary"],
-            bg="#121418", fg="#94a3b8", font=("Segoe UI", 9), wraplength=340, justify=tk.LEFT
-        )
-        d_summary.pack(anchor="w", pady=(4, 6))
-
-        d_foot = tk.Label(
-            details_box,
-            text=f"Items Synced: {curr_sync['items']}   |   Git Head Commit: {curr_sync['head_commit']}",
-            bg="#121418", fg="#34d399", font=("Consolas", 8)
-        )
-        d_foot.pack(anchor="w")
-
-    # --- Actions ---
     def show_toast(self, message: str):
         self.toast_message = message
         if self.toast_timer:
             self.root.after_cancel(self.toast_timer)
         self.build_ui()
-        self.toast_timer = self.root.after(3000, self.clear_toast)
+        self.toast_timer = self.root.after(3500, self.clear_toast)
 
     def clear_toast(self):
         self.toast_message = ""
@@ -496,112 +670,76 @@ class LazyTerminalCompanionApp:
     def handle_copy_token(self):
         self.root.clipboard_clear()
         self.root.clipboard_append(self.pairing_token)
-        self.show_toast(f"Token '{self.pairing_token}' copied to clipboard!")
+        self.show_toast(f"Copied pairing code {self.pairing_token} to clipboard!")
+
+    def handle_copy_host_url(self):
+        url = f"http://{self.local_ip}:{self.host_port}"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.show_toast(f"Copied Host URL {url} to clipboard!")
 
     def handle_regenerate_token(self):
-        new_token = self.generate_random_token()
-        self.pairing_token = new_token
-
-        # If Node backend is running locally, notify it to rotate pairing key
-        def _post_regenerate():
-            try:
-                req = urllib.request.Request(
-                    f"http://127.0.0.1:{self.host_port}/api/v1/pairing/generate",
-                    data=b"{}",
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=1.0) as resp:
-                    data = json.loads(resp.read().decode())
-                    if data.get("pairingKey"):
-                        self.pairing_token = data["pairingKey"]
-            except Exception:
-                pass
-            self.root.after(0, lambda: self.show_toast(f"Generated new pairing token: {self.pairing_token}"))
-
-        threading.Thread(target=_post_regenerate, daemon=True).start()
-
-    def handle_simulate_connect(self):
-        self.is_connected = True
-        self.show_toast("Mobile device connected successfully! Sync Manager unlocked.")
+        try:
+            res = local_api_json(self.host_port, "/api/v1/pairing/generate", method="POST", payload={})
+            self.pairing_token = res.get("pairingKey") or self.pairing_token
+            self.show_toast(f"Rotated pairing key: {self.pairing_token}")
+        except Exception as err:
+            self.show_toast(f"Failed to rotate key: {err}")
 
     def handle_disconnect(self):
-        self.is_connected = False
-        self.show_toast("Mobile device disconnected. Waiting for connection.")
+        try:
+            local_api_json(
+                self.host_port, "/api/v1/host/daemon/control", method="POST", payload={"status": "restart"}
+            )
+            self.refresh_from_backend()
+            self.show_toast("Disconnected active session and rotated pairing code.")
+        except Exception as err:
+            self.show_toast(f"Failed to disconnect session: {err}")
 
     def handle_toggle_server(self):
-        self.is_server_running = not self.is_server_running
-        state_str = "started" if self.is_server_running else "stopped"
-        self.show_toast(f"Host server daemon {state_str}.")
-
-    def handle_select_sync(self, event=None):
-        idx = self.sync_combo.current()
-        if 0 <= idx < len(self.sync_records):
-            self.selected_sync_id = self.sync_records[idx]["id"]
-            self.build_ui()
-
-    def handle_sync_request(self):
-        self.is_syncing = True
-        self.build_ui()
-
-        def _do_sync():
-            time.sleep(0.7)  # Simulated sync round-trip
-            new_id = f"SYNC-REQ-{105 + len(self.sync_records) - 3}"
-            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-            new_record = {
-                "id": new_id,
-                "timestamp": now_str,
-                "time_ago": "Just now",
-                "items": random.randint(1, 4),
-                "summary": "Synchronized workspace state & causal graph intents across tunnel",
-                "head_commit": "3f7a8b1",
-            }
-            self.sync_records.insert(0, new_record)
-            self.selected_sync_id = new_id
-            self.is_syncing = False
-            self.root.after(0, lambda: self.show_toast(f"Sync request {new_id} completed successfully!"))
-
-        threading.Thread(target=_do_sync, daemon=True).start()
-
-    def background_poll_loop(self):
-        """
-        Polls the local Express host companion API on port 3000 to synchronize:
-        - Active host pairing key
-        - Connected mobile sessions
-        """
-        while self.poll_active:
-            try:
-                # 1. Fetch live active pairing key if local host companion is running
-                url_key = f"http://127.0.0.1:{self.host_port}/api/v1/pairing/key"
-                req_key = urllib.request.Request(url_key, headers={"User-Agent": "LazyTerminal-Companion"})
-                with urllib.request.urlopen(req_key, timeout=0.8) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode())
-                        live_key = data.get("pairingKey")
-                        if live_key and live_key != self.pairing_token and not self.is_connected:
-                            self.pairing_token = live_key
-                            self.root.after(0, self.build_ui)
-
-                # 2. Check health & session connection status
-                url_health = f"http://127.0.0.1:{self.host_port}/health"
-                req_health = urllib.request.Request(url_health, headers={"User-Agent": "LazyTerminal-Companion"})
-                with urllib.request.urlopen(req_health, timeout=0.8) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode())
-                        # If backend reports serverStatus
-                        srv_status = data.get("serverStatus")
-                        if srv_status == "running" and not self.is_server_running:
-                            self.is_server_running = True
-                            self.root.after(0, self.build_ui)
-            except Exception:
-                pass
-
-            time.sleep(1.5)
+        action = "stop" if self.is_server_running else "start"
+        try:
+            local_api_json(
+                self.host_port, "/api/v1/host/daemon/control", method="POST", payload={"status": action}
+            )
+            self.refresh_from_backend()
+            self.show_toast(f"Host companion service {action}ped.")
+        except Exception as err:
+            self.show_toast(f"Control error: {err}")
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Lazy Terminal Windows PC Companion")
+    parser.add_argument("--headless", action="store_true", help="Run without Tkinter desktop window")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("LAZY_TERMINAL_HOST_PORT", "3000")), help="Host port")
+    args = parser.parse_args()
+
+    backend = HostBackendProcessManager(preferred_port=args.port)
+    port = backend.start()
+
+    if args.headless or tk is None:
+        key_info = local_api_json(port, "/api/v1/pairing/key")
+        print(
+            f"[LazyTerminalCompanion] Headless mode active on http://0.0.0.0:{port} "
+            f"(LAN: http://{get_local_ip()}:{port}, Pairing Key: {key_info.get('pairingKey')})",
+            flush=True,
+        )
+        stop_event = threading.Event()
+
+        def _sig_handler(_signum, _frame):
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+        try:
+            while not stop_event.is_set():
+                time.sleep(0.5)
+        finally:
+            backend.stop()
+        return
+
     root = tk.Tk()
-    app = LazyTerminalCompanionApp(root)
+    LazyTerminalCompanionApp(root, backend)
     root.mainloop()
 
 

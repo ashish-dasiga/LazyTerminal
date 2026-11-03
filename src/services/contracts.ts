@@ -1,13 +1,12 @@
-import { 
-  CommandIntent, 
-  DeviceInfo, 
-  DevServer, 
-  Project, 
-  ProjectFile, 
-  TerminalLine, 
-  TerminalSession, 
+import {
+  CommandIntent,
+  DeviceInfo,
+  DevServer,
+  ProjectFile,
+  TerminalLine,
+  TerminalSession,
   UserAccount,
-  AiCliTool 
+  AiCliTool,
 } from '../types/relay';
 
 // ============================================================================
@@ -32,37 +31,10 @@ export interface RefreshTokenResponse {
   tokenExpiresAt: string;
 }
 
-/**
- * Service contract for User Authentication and Session Identity.
- * Real backend developers must implement this interface backed by the user auth service.
- */
 export interface IAuthService {
-  /**
-   * Authenticate user credentials.
-   * @endpoint POST /api/v1/auth/login
-   * @transport HTTPS REST
-   */
   login(req: LoginRequest): Promise<LoginResponse>;
-
-  /**
-   * Invalidate current user session token.
-   * @endpoint POST /api/v1/auth/logout
-   * @transport HTTPS REST
-   */
   logout(): Promise<void>;
-
-  /**
-   * Retrieve currently authenticated user profile.
-   * @endpoint GET /api/v1/auth/me
-   * @transport HTTPS REST
-   */
   getCurrentUser(): Promise<UserAccount>;
-
-  /**
-   * Refresh expiring session token.
-   * @endpoint POST /api/v1/auth/refresh
-   * @transport HTTPS REST
-   */
   refreshToken(): Promise<RefreshTokenResponse>;
 }
 
@@ -71,7 +43,7 @@ export interface IAuthService {
 // ============================================================================
 
 export interface GenerateKeyResponse {
-  pairingKey: string; // e.g. "784-291"
+  pairingKey: string;
   expiresInSeconds: number;
   qrPayload: string;
 }
@@ -96,6 +68,7 @@ export interface ConnectHostResponse {
   success: boolean;
   device: DeviceInfo;
   sessionToken: string;
+  activeWorkspaceRoot?: string;
   errorMessage?: string;
 }
 
@@ -106,58 +79,61 @@ export interface HostServerStatusResponse {
   memoryUsageMb: number;
 }
 
-/**
- * Service contract for Windows PC Pairing and Tunnel Connection.
- * Real backend developers must implement this over the host daemon's discovery & auth port.
- */
 export interface IConnectionService {
-  /**
-   * Generates a 6-digit cryptographic pairing key on the Windows PC application.
-   * @endpoint RPC Host.GeneratePairingKey
-   * @transport Local IPC / Daemon API
-   */
   generateHostKey(): Promise<GenerateKeyResponse>;
-
-  /**
-   * Fetches the active 6-digit cryptographic pairing key from the Windows PC companion.
-   * @endpoint GET /api/v1/pairing/key
-   */
   fetchActiveHostKey?(): Promise<{ pairingKey: string; expiresInSeconds: number }>;
-
-  /**
-   * Validates the 6-digit key entered on the mobile phone before opening tunnel.
-   * @endpoint POST /api/v1/pairing/validate
-   * @transport TLS Relay Server or Local LAN Handshake
-   */
   validatePairingKey(req: ValidateKeyRequest): Promise<ValidateKeyResponse>;
-
-  /**
-   * Establishes the secure E2E Ed25519 encrypted tunnel between phone and PC.
-   * @endpoint POST /api/v1/tunnel/connect
-   * @transport WebSocket / WebRTC DataChannel (Sub-20ms)
-   */
   connectToHost(req: ConnectHostRequest): Promise<ConnectHostResponse>;
-
-  /**
-   * Closes the active remote session and tears down the tunnel.
-   * @endpoint POST /api/v1/tunnel/disconnect
-   * @transport WebSocket close / REST
-   */
   disconnectHost(): Promise<void>;
-
-  /**
-   * Fetches latest host hardware health, latency, and daemon metrics.
-   * @endpoint GET /api/v1/host/status
-   * @transport REST / Heartbeat Ping
-   */
-  getHostDeviceInfo(): Promise<DeviceInfo>;
-
-  /**
-   * Toggles or restarts the native Windows background daemon process.
-   * @endpoint POST /api/v1/host/daemon/control
-   * @transport Windows Service Controller / IPC
-   */
+  getHostDeviceInfo(): Promise<DeviceInfo & { activeWorkspaceRoot?: string }>;
   setHostServerStatus(status: 'start' | 'stop' | 'restart'): Promise<HostServerStatusResponse>;
+}
+
+// ============================================================================
+// 2B. DYNAMIC WINDOWS WORKSPACE SERVICE CONTRACTS
+// ============================================================================
+
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  path: string;
+  exists: boolean;
+  accessible: boolean;
+  isGitRepo: boolean;
+  gitRoot?: string;
+  branch?: string;
+  dirtyFiles?: number;
+  lastCommitHash?: string;
+  lastCommitMsg?: string;
+  lastSyncedAt?: string;
+}
+
+export interface WorkspaceStateResponse {
+  activeWorkspace: WorkspaceInfo | null;
+  recentWorkspaces: WorkspaceInfo[];
+  allowedRoots: string[];
+}
+
+export interface WorkspaceBrowseEntry {
+  name: string;
+  path: string;
+  isGitRepo: boolean;
+  lastModified?: string;
+}
+
+export interface WorkspaceBrowseResponse {
+  currentPath: string | null;
+  parentPath: string | null;
+  drives: string[];
+  entries: WorkspaceBrowseEntry[];
+}
+
+export interface IWorkspaceService {
+  getState(): Promise<WorkspaceStateResponse>;
+  browse(dirPath?: string): Promise<WorkspaceBrowseResponse>;
+  selectWorkspace(folderPath: string): Promise<{ workspace: WorkspaceInfo; recentWorkspaces: WorkspaceInfo[] }>;
+  pickNativeFolder(initialPath?: string): Promise<{ cancelled: boolean; workspace?: WorkspaceInfo }>;
+  scanRepositories(rootPath?: string): Promise<{ repositories: WorkspaceInfo[] }>;
 }
 
 // ============================================================================
@@ -168,6 +144,8 @@ export interface CreateSessionRequest {
   title: string;
   type: TerminalSession['type'];
   workingDir?: string;
+  cols?: number;
+  rows?: number;
 }
 
 export interface ExecuteCommandRequest {
@@ -180,6 +158,7 @@ export interface ExecuteCommandRequest {
 export interface ExecuteCommandResponse {
   commandId: string;
   queuedOffline?: boolean;
+  workingDir?: string;
   lines: Array<{
     type: TerminalLine['type'];
     content: string;
@@ -198,45 +177,19 @@ export interface SendSignalRequest {
   signal: 'SIGINT' | 'SIGTERM' | 'CLEAR';
 }
 
-/**
- * Service contract for Pseudoterminal (PTY) emulation and shell process dispatch.
- * Real backend developers must implement this over ConPTY (Windows) or PTY (Linux/Mac).
- */
 export interface ITerminalService {
-  /**
-   * Lists all open shell/CLI sessions running on the Windows PC.
-   * @endpoint GET /api/v1/pty/sessions
-   * @transport REST
-   */
   listSessions(): Promise<TerminalSession[]>;
-
-  /**
-   * Spawns a new ConPTY session (pwsh, cmd, bash, or AI agent) on the host PC.
-   * @endpoint POST /api/v1/pty/sessions
-   * @transport REST / WebSocket
-   */
+  getSession?(sessionId: string): Promise<TerminalSession>;
   createSession(req: CreateSessionRequest): Promise<TerminalSession>;
-
-  /**
-   * Closes a running PTY session and kills the attached process tree.
-   * @endpoint DELETE /api/v1/pty/sessions/:id
-   * @transport REST
-   */
   closeSession(sessionId: string): Promise<void>;
-
-  /**
-   * Dispatches input string to the running PTY stdin or buffers offline if disconnected.
-   * @endpoint POST /api/v1/pty/sessions/:id/input
-   * @transport WebSocket Frame / ConPTY Write
-   */
   executeCommand(req: ExecuteCommandRequest): Promise<ExecuteCommandResponse>;
-
-  /**
-   * Sends POSIX/Windows control signals (Ctrl+C, Ctrl+Break, Clear) to active PTY.
-   * @endpoint POST /api/v1/pty/sessions/:id/signal
-   * @transport ConPTY GenerateConsoleCtrlEvent
-   */
   sendSignal(req: SendSignalRequest): Promise<void>;
+  resizeSession?(sessionId: string, cols: number, rows: number): Promise<void>;
+  subscribeSessionStream?(
+    sessionId: string,
+    onLine: (line: TerminalLine & { workingDir?: string }) => void,
+    onError?: (err: unknown) => void,
+  ): () => void;
 }
 
 // ============================================================================
@@ -246,22 +199,28 @@ export interface ITerminalService {
 export interface ListFilesRequest {
   projectPath: string;
   subDirectory?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface ReadFileRequest {
   filePath: string;
+  projectPath?: string;
 }
 
 export interface ReadFileResponse {
   filePath: string;
   content: string;
   sizeBytes: number;
+  size?: number;
+  hash?: string;
   encoding: 'utf-8' | 'binary';
   lastModified: string;
 }
 
 export interface WriteFileRequest {
   filePath: string;
+  projectPath?: string;
   content: string;
   expectedVersionHash?: string;
 }
@@ -275,52 +234,50 @@ export interface WriteFileResponse {
 
 export interface CreateFileRequest {
   directoryPath: string;
+  projectPath?: string;
   fileName: string;
   isTextOnly?: boolean;
+  isFolder?: boolean;
+  content?: string;
+}
+
+export interface RenameFileRequest {
+  projectPath: string;
+  oldPath: string;
+  newName: string;
+}
+
+export interface RenameFileResponse {
+  success: boolean;
+  oldPath: string;
+  newPath: string;
+  name: string;
+  type: 'file' | 'folder';
 }
 
 export interface DeleteFileRequest {
   filePath: string;
+  projectPath?: string;
+  recursive?: boolean;
 }
 
-/**
- * Service contract for Remote File System operations on the Windows PC.
- * Real backend developers must implement this against native Win32/std::fs APIs.
- */
+export interface FileStatResponse {
+  name: string;
+  path: string;
+  fullPath: string;
+  type: 'file' | 'folder';
+  size: number;
+  lastModified: string;
+  readonly: boolean;
+}
+
 export interface IFileSystemService {
-  /**
-   * Lists directory contents and file metadata.
-   * @endpoint GET /api/v1/fs/list?dir=...
-   * @transport REST
-   */
   listFiles(req: ListFilesRequest): Promise<ProjectFile[]>;
-
-  /**
-   * Reads raw file contents for viewing and editing.
-   * @endpoint GET /api/v1/fs/read?path=...
-   * @transport REST
-   */
+  statFile?(filePath: string, projectPath?: string): Promise<FileStatResponse>;
   readFile(req: ReadFileRequest): Promise<ReadFileResponse>;
-
-  /**
-   * Writes buffer to disk on the Windows PC and updates Git dirty status.
-   * @endpoint POST /api/v1/fs/write
-   * @transport REST
-   */
   writeFile(req: WriteFileRequest): Promise<WriteFileResponse>;
-
-  /**
-   * Creates a new empty or text file in the workspace.
-   * @endpoint POST /api/v1/fs/create
-   * @transport REST
-   */
   createFile(req: CreateFileRequest): Promise<ProjectFile>;
-
-  /**
-   * Deletes a file or directory on the host PC.
-   * @endpoint DELETE /api/v1/fs/delete
-   * @transport REST
-   */
+  renameFile?(req: RenameFileRequest): Promise<RenameFileResponse>;
   deleteFile(req: DeleteFileRequest): Promise<void>;
 }
 
@@ -329,7 +286,9 @@ export interface IFileSystemService {
 // ============================================================================
 
 export interface GitStatusResponse {
+  isGitRepo?: boolean;
   projectPath: string;
+  rootPath?: string;
   branch: string;
   isDirty: boolean;
   dirtyFilesCount: number;
@@ -366,59 +325,16 @@ export interface GitPushPullResponse {
   newHeadCommit?: string;
 }
 
-/**
- * Service contract for Git Version Control operations.
- * Real backend developers must implement this via libgit2 or git CLI wrapper.
- */
 export interface IGitService {
-  /**
-   * Fetches Git repository status, branch, and working tree modifications.
-   * @endpoint GET /api/v1/git/status?project=...
-   * @transport REST
-   */
   getStatus(projectPath: string): Promise<GitStatusResponse>;
-
-  /**
-   * Stages specified files for commit (git add).
-   * @endpoint POST /api/v1/git/stage
-   * @transport REST
-   */
-  stageFiles(files: string[]): Promise<void>;
-
-  /**
-   * Unstages specified files (git restore --staged).
-   * @endpoint POST /api/v1/git/unstage
-   * @transport REST
-   */
-  unstageFiles(files: string[]): Promise<void>;
-
-  /**
-   * Creates a new commit in the repository.
-   * @endpoint POST /api/v1/git/commit
-   * @transport REST
-   */
+  getBranches?(projectPath: string): Promise<{ currentBranch: string; branches: string[] }>;
+  getDiff?(projectPath: string, filePath?: string, staged?: boolean): Promise<string>;
+  stageFiles(files: string[], projectPath?: string): Promise<void>;
+  unstageFiles(files: string[], projectPath?: string): Promise<void>;
   commit(req: GitCommitRequest): Promise<GitCommitResponse>;
-
-  /**
-   * Pushes current branch to remote upstream.
-   * @endpoint POST /api/v1/git/push
-   * @transport REST
-   */
-  push(branch?: string): Promise<GitPushPullResponse>;
-
-  /**
-   * Pulls remote changes into current branch.
-   * @endpoint POST /api/v1/git/pull
-   * @transport REST
-   */
-  pull(branch?: string): Promise<GitPushPullResponse>;
-
-  /**
-   * Switches git branch or creates a new branch.
-   * @endpoint POST /api/v1/git/checkout
-   * @transport REST
-   */
-  switchBranch(branchName: string): Promise<void>;
+  push(branch?: string, projectPath?: string): Promise<GitPushPullResponse>;
+  pull(branch?: string, projectPath?: string): Promise<GitPushPullResponse>;
+  switchBranch(branchName: string, projectPath?: string, createNew?: boolean): Promise<void>;
 }
 
 // ============================================================================
@@ -437,32 +353,13 @@ export interface CliStatusResponse {
   isInstalled: boolean;
   version?: string;
   path?: string;
+  authStatus?: 'authenticated' | 'unauthenticated' | 'unknown' | 'not_installed';
+  authDetail?: string;
 }
 
-/**
- * Service contract for developer CLI tools (Claude Code, OpenAI Codex, Gemini CLI).
- * Real backend developers must query Windows PATH and package managers (npm, cargo, pip).
- */
 export interface ICliService {
-  /**
-   * Discovers and lists all registered CLI tools and their host installation states.
-   * @endpoint GET /api/v1/cli/tools
-   * @transport REST
-   */
   listTools(): Promise<AiCliTool[]>;
-
-  /**
-   * Executes package manager installer (e.g. npm install -g @anthropic-ai/claude-code).
-   * @endpoint POST /api/v1/cli/install
-   * @transport REST / Long-running job
-   */
   installTool(toolId: string): Promise<InstallToolResponse>;
-
-  /**
-   * Checks whether an arbitrary CLI executable exists in the host system PATH.
-   * @endpoint GET /api/v1/cli/check?name=...
-   * @transport REST
-   */
   checkCliStatus(cliName: string): Promise<CliStatusResponse>;
 }
 
@@ -486,46 +383,15 @@ export interface DesktopAppStreamInfo {
   fps: number;
   resolution: string;
   streamUrl: string;
+  supported?: boolean;
+  reason?: string;
 }
 
-/**
- * Service contract for Web Previews, Python execution, and Windows App window streaming.
- * Real backend developers must implement HTTP port forwarding tunnels and screen capture.
- */
 export interface IPreviewService {
-  /**
-   * Lists active development HTTP servers running on localhost.
-   * @endpoint GET /api/v1/preview/servers
-   * @transport REST
-   */
   listDevServers(): Promise<DevServer[]>;
-
-  /**
-   * Starts or restarts a project development server on a target port.
-   * @endpoint POST /api/v1/preview/servers/start
-   * @transport REST
-   */
-  startDevServer(command: string, port: number): Promise<DevServer>;
-
-  /**
-   * Stops an active dev server process.
-   * @endpoint POST /api/v1/preview/servers/stop
-   * @transport REST
-   */
+  startDevServer(command: string, port: number, workingDir?: string): Promise<DevServer>;
   stopDevServer(serverId: string): Promise<void>;
-
-  /**
-   * Executes a Python script and captures stdout/stderr for mobile preview.
-   * @endpoint POST /api/v1/preview/python/run
-   * @transport REST
-   */
   runPythonPreview(scriptPath: string): Promise<PythonPreviewResponse>;
-
-  /**
-   * Fetches low-latency WebRTC desktop window stream metrics for Windows GUI apps.
-   * @endpoint GET /api/v1/preview/desktop/:appId
-   * @transport WebRTC PeerConnection
-   */
   getDesktopAppStream(appId: string): Promise<DesktopAppStreamInfo>;
 }
 
@@ -560,43 +426,13 @@ export interface CloudExecutionResponse {
   }>;
 }
 
-/**
- * Service contract for Offline Intent queueing and Causal Sequence Reconciliation.
- * Real backend developers must implement SQLite WAL persistence on mobile and
- * server-side sequence replay with git base verification.
- */
 export interface ISyncService {
-  /**
-   * Buffers an offline prompt or command into the local SQLite ledger.
-   * @storage Local SQLite / IndexedDB (Phone)
-   */
-  queueIntent(intent: Omit<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'>): Promise<CommandIntent>;
-
-  /**
-   * Reads all queued and reconciled intents from the ledger.
-   * @storage Local SQLite / IndexedDB
-   */
+  queueIntent(
+    intent: Omit<CommandIntent, 'id' | 'seq' | 'timestamp' | 'status'>,
+  ): Promise<CommandIntent>;
   listQueuedIntents(): Promise<CommandIntent[]>;
-
-  /**
-   * Reconciles a single queued intent against the PC's live repository state.
-   * @endpoint POST /api/v1/sync/reconcile-single
-   * @transport WebSocket / REST
-   */
   reconcileIntent(id: string, action: 'run' | 'skip' | 'cancel'): Promise<ReconciliationResult>;
-
-  /**
-   * Reconciles the entire queued batch in sequence with causal verification.
-   * @endpoint POST /api/v1/sync/reconcile-all
-   * @transport WebSocket / REST
-   */
   reconcileAll(forceRun?: boolean): Promise<ReconciliationSummary>;
-
-  /**
-   * Dispatches queued intents to optional cloud sandbox worker when PC is unreachable.
-   * @endpoint POST /api/v1/sync/cloud-worker/dispatch
-   * @transport Cloud API Gateway
-   */
   triggerCloudFallback(intentIds: string[]): Promise<CloudExecutionResponse>;
 }
 
@@ -610,6 +446,7 @@ export interface IRelayBackendAdapter {
   readonly backendEndpoint: string;
   auth: IAuthService;
   connection: IConnectionService;
+  workspace?: IWorkspaceService;
   terminal: ITerminalService;
   fileSystem: IFileSystemService;
   git: IGitService;

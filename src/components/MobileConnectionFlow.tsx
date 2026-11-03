@@ -1,169 +1,231 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { useRelay } from '../context/RelayContext';
 import { 
-  ArrowRight, 
   AlertCircle, 
   Loader2, 
   ShieldCheck,
-  RefreshCw
+  CheckCircle2,
+  RefreshCw,
+  Settings,
+  Wifi
 } from 'lucide-react';
+import { getAppConfig, setHostUrl } from '../services/config';
 
 export function MobileConnectionFlow() {
   const { 
-    connectionStep, 
     connectionError, 
     setConnectionError, 
     connectWithKey 
   } = useRelay();
 
   const [tokenInput, setTokenInput] = useState('');
-  const [localValidation, setLocalValidation] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  const isVerifying = connectionStep === 'connecting';
+  // Host configuration state
+  const [hostUrl, setHostUrlState] = useState(() => getAppConfig().hostBaseUrl);
+  const [isEditingHost, setIsEditingHost] = useState(false);
+  const [customHostInput, setCustomHostInput] = useState(hostUrl);
 
-  // Format token cleanly as user types: digits only, insert hyphen after 3 digits
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = e.target.value.replace(/[^\d-]/g, '');
-    const digits = raw.replace(/\D/g, '').slice(0, 6);
-    let formatted = digits;
-    if (digits.length > 3) {
-      formatted = `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  const handleSaveHost = () => {
+    let clean = customHostInput.trim();
+    if (!clean) return;
+    if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+      clean = `http://${clean}`;
     }
-
-    setTokenInput(formatted);
-    if (localValidation) setLocalValidation(null);
+    setHostUrl(clean);
+    setHostUrlState(clean);
+    setIsEditingHost(false);
     if (connectionError) setConnectionError(null);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = tokenInput.trim();
+
+    if (!trimmed) {
+      setValidationError('Please enter a pairing code.');
+      return;
+    }
+
     if (isVerifying) return;
 
-    const trimmed = tokenInput.trim();
-    if (!trimmed) {
-      setLocalValidation('Please enter the 6-digit pairing code.');
-      inputRef.current?.focus();
+    // Validate format (expected 6 alphanumeric characters or digits, optionally hyphenated)
+    const normalized = trimmed.replace(/[\s-]/g, '');
+    if (normalized.length < 6) {
+      setValidationError('Pairing code must be at least 6 digits (e.g. 123-456).');
       return;
     }
 
-    const digitsOnly = trimmed.replace(/\D/g, '');
-    if (digitsOnly.length !== 6) {
-      setLocalValidation('Pairing code must be 6 digits (e.g. 123-456).');
-      inputRef.current?.focus();
-      return;
+    // Auto-save host address if changed
+    if (customHostInput.trim()) {
+      let clean = customHostInput.trim();
+      if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+        clean = `http://${clean}`;
+      }
+      clean = clean.replace(/\/+$/, '');
+      if (clean !== hostUrl) {
+        setHostUrl(clean);
+        setHostUrlState(clean);
+      }
     }
 
-    setLocalValidation(null);
-    await connectWithKey(trimmed);
-  };
+    setValidationError(null);
+    if (connectionError) setConnectionError(null);
+    setIsVerifying(true);
 
-  const handleRetry = () => {
-    setConnectionError(null);
-    setLocalValidation(null);
-    if (inputRef.current) {
-      inputRef.current.focus();
+    try {
+      await connectWithKey(trimmed);
+    } finally {
+      setIsVerifying(false);
     }
   };
 
-  const activeError = localValidation || connectionError;
+  const activeError = validationError || connectionError;
 
   return (
-    <div className="relative flex-1 flex flex-col justify-between p-4 sm:p-6 bg-[#0e1015] text-zinc-100 font-sans select-none overflow-hidden min-h-0">
-      {/* Subtle translucent, low-contrast, non-interactive background logo */}
+    <div className="flex-1 flex flex-col justify-between p-4 sm:p-6 bg-[#0c0e14] text-zinc-100 font-sans select-none overflow-y-auto relative min-h-full">
+      {/* Subtle translucent glass-like brand logo in the background */}
       <div 
         aria-hidden="true" 
-        className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden z-0 select-none opacity-[0.035] filter blur-[0.5px]"
+        className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden select-none z-0"
       >
-        <img 
-          src="/icon.jpeg" 
-          alt="" 
-          className="w-[360px] h-[360px] max-w-none object-contain transform scale-110" 
+        <img
+          src="./icon.jpeg"
+          alt=""
+          className="w-80 h-80 sm:w-96 sm:h-96 rounded-full object-cover opacity-[0.035] blur-[1px] scale-125"
+          onError={(e) => {
+            (e.target as HTMLImageElement).src = '/icon.jpeg';
+          }}
         />
       </div>
 
-      {/* Main card centered in viewport */}
-      <div className="relative z-10 my-auto py-4 max-w-sm w-full mx-auto">
-        <div className="bg-[#151821]/80 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-2xl shadow-black/60 p-6 space-y-6">
-          {/* Brand header with real logo */}
-          <div className="flex flex-col items-center text-center space-y-3">
-            <div className="w-16 h-16 rounded-2xl bg-[#1b1f2b]/90 border border-white/10 p-2 shadow-lg flex items-center justify-center overflow-hidden ring-1 ring-blue-500/20">
+      {/* Spacer to balance vertical centering */}
+      <div className="hidden sm:block h-2" />
+
+      {/* Main Glassmorphic Pairing Card */}
+      <main className="relative z-10 my-auto py-4 max-w-sm w-full mx-auto">
+        <div className="bg-[#141722]/85 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-2xl p-6 sm:p-7 space-y-6 transition-all duration-200">
+          
+          {/* Card Header with Real Brand Logo */}
+          <div className="text-center space-y-3">
+            <div className="relative inline-block mx-auto group">
+              <div className="absolute -inset-1 rounded-2xl bg-gradient-to-tr from-cyan-500/20 via-blue-600/20 to-sky-400/20 blur-sm opacity-70 group-hover:opacity-100 transition duration-300" />
               <img
-                src="/icon.jpeg"
-                alt="Lazy Terminal logo"
-                className="w-full h-full object-contain rounded-xl"
+                src="./icon.jpeg"
+                alt="Lazy Terminal Logo"
+                className="relative w-16 h-16 sm:w-18 sm:h-18 rounded-2xl object-cover border border-[#2b3040] shadow-xl mx-auto transition-transform duration-200 group-hover:scale-105"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = '/icon.jpeg';
+                }}
               />
             </div>
 
-            <div className="space-y-1">
-              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white">
-                Pair with Windows PC
-              </h1>
-              <p className="text-xs text-zinc-400 max-w-[280px] leading-relaxed">
-                Enter the 6-digit pairing code shown on your Windows host companion.
-              </p>
-            </div>
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+              Connect to Windows PC
+            </h1>
+            <p className="text-xs text-zinc-400 leading-relaxed max-w-xs mx-auto">
+              Enter the Host PC IP and 6-digit pairing code shown on your Windows companion app.
+            </p>
           </div>
 
-          {/* Error Message Box with Retry button */}
+          {/* Error Message Box (if validation or connection fails) */}
           {activeError && (
             <div 
-              role="alert" 
-              className="p-3.5 bg-rose-950/40 border border-rose-800/50 rounded-xl flex items-start gap-3 text-xs text-rose-200 animate-in fade-in duration-150"
+              role="alert"
+              className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/25 text-red-300 text-xs flex items-start gap-2.5 animate-fadeIn"
             >
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <div className="flex-1 space-y-1.5">
-                <div className="leading-snug">{activeError}</div>
-                <button
-                  type="button"
-                  onClick={handleRetry}
-                  className="text-[11px] font-semibold text-rose-300 hover:text-white underline cursor-pointer inline-flex items-center gap-1 focus:outline-none focus:ring-1 focus:ring-rose-400 rounded"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Retry</span>
-                </button>
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+              <div className="leading-relaxed break-words flex-1">
+                <div className="font-semibold text-red-200 mb-0.5">Connection Failed</div>
+                <div>{activeError}</div>
+                <div className="mt-2 text-[10px] text-zinc-400 leading-tight border-t border-red-500/20 pt-1.5 space-y-0.5">
+                  <div>1. Ensure phone & PC are on the same Wi-Fi.</div>
+                  <div>2. Check that the Lazy Terminal Companion is open on PC.</div>
+                  <div>3. Verify the Host PC IP below matches your PC screen.</div>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Simplified Single Input & Single Action Form */}
-          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-            <div className="space-y-2">
+          {/* Dual Input Pairing Form: Host IP + Code */}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Host PC IP Field */}
+            <div className="space-y-1 text-left">
+              <div className="flex items-center justify-between">
+                <label 
+                  htmlFor="host-ip-input"
+                  className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block"
+                >
+                  Host PC LAN Address
+                </label>
+                <span className="text-[10px] text-zinc-500 font-mono">From PC Screen</span>
+              </div>
+              <div className="relative">
+                <input
+                  id="host-ip-input"
+                  name="hostAddress"
+                  aria-label="Host PC Address"
+                  type="text"
+                  value={customHostInput}
+                  onChange={(e) => {
+                    setCustomHostInput(e.target.value);
+                    if (validationError) setValidationError(null);
+                    if (connectionError) setConnectionError(null);
+                  }}
+                  onBlur={handleSaveHost}
+                  placeholder="http://192.168.1.x:9871"
+                  disabled={isVerifying}
+                  className="w-full h-11 px-3.5 bg-[#0d1017]/90 border border-zinc-700/60 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-xs sm:text-sm font-mono text-white placeholder:text-zinc-600 outline-none transition-all duration-150 disabled:opacity-50"
+                />
+              </div>
+              {customHostInput.includes('10.0.2.2') && (
+                <p className="text-[10px] text-amber-400/90 leading-tight pt-0.5">
+                  ⚠️ Note: 10.0.2.2 is for emulator only. On a physical phone, replace with your PC&apos;s Wi-Fi IP (e.g. http://192.168.1.x:9871).
+                </p>
+              )}
+            </div>
+
+            {/* Pairing Code Field */}
+            <div className="space-y-1.5 text-left">
               <label 
-                htmlFor="pairing-code" 
+                htmlFor="pairing-code-input"
                 className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block"
               >
-                Pairing Code
+                6-Digit Pairing Code
               </label>
 
               <div className="relative">
                 <input
-                  ref={inputRef}
-                  id="pairing-code"
+                  id="pairing-code-input"
                   name="pairingCode"
+                  aria-label="Pairing Code"
                   type="text"
                   inputMode="numeric"
                   autoComplete="one-time-code"
                   value={tokenInput}
-                  onChange={handleInputChange}
-                  placeholder="e.g. 123-456"
+                  onChange={(e) => {
+                    setTokenInput(e.target.value);
+                    if (validationError) setValidationError(null);
+                    if (connectionError) setConnectionError(null);
+                  }}
+                  placeholder="123-456"
                   disabled={isVerifying}
-                  maxLength={7}
                   autoFocus
-                  className="w-full h-12 px-4 bg-[#0d0f14] border border-[#2a2f3d] focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 rounded-xl text-lg font-mono font-bold tracking-widest text-center text-white placeholder:text-zinc-600 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full h-12 sm:h-13 px-4 bg-[#0d1017]/90 border border-zinc-700/60 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-base sm:text-lg font-mono font-bold tracking-widest text-center text-white placeholder:text-zinc-600 outline-none transition-all duration-150 disabled:opacity-50"
                 />
               </div>
             </div>
 
-            {/* Primary Action Button: Connect to PC */}
+            {/* Primary Action Button */}
             <button
               type="submit"
               disabled={!tokenInput.trim() || isVerifying}
-              aria-label={isVerifying ? 'Connecting to PC' : 'Connect to PC'}
-              className={`w-full h-12 rounded-xl font-medium text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-md active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${
+              aria-label="Connect to PC"
+              className={`w-full h-11 sm:h-12 rounded-xl font-semibold text-xs sm:text-sm flex items-center justify-center gap-2 cursor-pointer transition-all duration-150 shadow-md ${
                 tokenInput.trim() && !isVerifying
-                  ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white cursor-pointer shadow-blue-600/20'
-                  : 'bg-[#1a1d26] text-zinc-500 border border-[#282d3b] cursor-not-allowed'
+                  ? 'bg-blue-600 hover:bg-blue-500 active:bg-blue-700 active:scale-[0.99] text-white shadow-blue-600/20'
+                  : 'bg-[#1e222c] text-zinc-500 border border-[#2b303d] cursor-not-allowed opacity-60'
               }`}
             >
               {isVerifying ? (
@@ -172,23 +234,15 @@ export function MobileConnectionFlow() {
                   <span>Connecting to PC...</span>
                 </>
               ) : (
-                <>
-                  <span>Connect to PC</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
+                <span>Connect to PC</span>
               )}
             </button>
           </form>
 
-          {/* Connection status indicator */}
-          <div className="flex items-center justify-center gap-2 text-[11px] text-zinc-500">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500/80 animate-pulse" />
-            <span>Ready for local pairing</span>
-          </div>
         </div>
-      </div>
+      </main>
 
-      {/* Refined Security Badge Footer */}
+      {/* Accessible Footer Security Badge */}
       <footer className="relative z-10 text-center py-2 text-[11px] text-zinc-500 font-mono flex items-center justify-center gap-1.5 shrink-0">
         <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
         <span>TLS 1.3 · Mutual Ed25519 Token Authentication</span>

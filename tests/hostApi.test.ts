@@ -1,111 +1,248 @@
 import assert from 'assert';
-import http from 'http';
-import express from 'express';
-import { fsRouter } from '../src/server/fsRoutes';
-import { gitRouter } from '../src/server/gitRoutes';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { startHostCompanionServer } from '../src/host/companionServer';
+import { clearDynamicAuthorizedRoots } from '../src/server/fsSecurity';
 
 async function testApi() {
-  console.log('--- Testing Host Companion Filesystem and Git REST Endpoints ---');
+  console.log('--- Testing Host Companion Dynamic Workspace, Filesystem, and Git REST Endpoints ---');
 
-  const app = express();
-  app.use(express.json());
-  app.use('/api/v1/fs', fsRouter);
-  app.use('/api/v1/git', gitRouter);
+  const tempParent = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-phase3-'));
+  const spaceWorkspace = path.join(tempParent, 'Lazy Terminal E2E Workspace');
+  fs.mkdirSync(spaceWorkspace, { recursive: true });
 
-  const server = http.createServer(app);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const port = (server.address() as any).port;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const host = await startHostCompanionServer(
+    {
+      hostBind: '127.0.0.1',
+      hostPort: 0,
+      defaultWorkspaceRoot: process.cwd(),
+      allowedRoots: [process.cwd(), tempParent],
+    },
+    { silentLogger: true },
+  );
+
+  const baseUrl = `http://127.0.0.1:${host.port}`;
 
   try {
-    // 1. Test FS List on current project and default UI project placeholder
-    const listRes = await fetch(`${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
-    assert.strictEqual(listRes.status, 200, 'GET /api/v1/fs/list should return 200');
-    const listData = await listRes.json();
-    assert.ok(Array.isArray(listData.files), 'Response should contain files array');
-    assert.ok(listData.files.length > 0, 'Directory listing should contain files');
-    const hasPackageJson = listData.files.some((f: any) => f.name === 'package.json');
-    assert.ok(hasPackageJson, 'Listing should find package.json');
-    console.log('✓ GET /api/v1/fs/list returned real project files.');
+    // 0. Authenticate via real pairing flow
+    const keyRes = await fetch(`${baseUrl}/api/v1/pairing/key`);
+    assert.strictEqual(keyRes.status, 200);
+    const { pairingKey } = await keyRes.json();
 
-    // 1b. Test FS List on subdirectory (src)
-    const subListRes = await fetch(
-      `${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}&subDirectory=src`
-    );
-    assert.strictEqual(subListRes.status, 200, 'Subdirectory list should return 200');
-    const subListData = await subListRes.json();
-    assert.ok(subListData.files.some((f: any) => f.name === 'App.tsx'), 'src listing should include App.tsx');
-    console.log('✓ GET /api/v1/fs/list?subDirectory=src returned real subdirectory files.');
-
-    // 2. Test Path Traversal Protection over HTTP
-    const attackRes = await fetch(
-      `${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent(process.cwd())}&subDirectory=${encodeURIComponent('../../../../../../etc')}`
-    );
-    assert.strictEqual(attackRes.status, 403, 'Path traversal should return HTTP 403 Forbidden');
-    const attackData = await attackRes.json();
-    assert.strictEqual(attackData.error, 'PATH_NOT_ALLOWED');
-    console.log('✓ Path traversal blocked over HTTP API with 403 PATH_NOT_ALLOWED.');
-
-    // 3. Test Read File
-    const readRes = await fetch(`${baseUrl}/api/v1/fs/read?filePath=package.json`);
-    assert.strictEqual(readRes.status, 200);
-    const readData = await readRes.json();
-    assert.strictEqual(readData.encoding, 'utf-8');
-    assert.ok(readData.hash.startsWith('sha256:'));
-    assert.ok(readData.content.includes('"name": "react-example"'));
-    console.log('✓ GET /api/v1/fs/read successfully read package.json with SHA-256 hash.');
-
-    // 3b. Test Create, Conflict Detection (409), Write, and Delete Lifecycle over HTTP
-    const tempFileName = `.tmp_api_test_${Date.now()}.txt`;
-    const createRes = await fetch(`${baseUrl}/api/v1/fs/create`, {
+    const connectRes = await fetch(`${baseUrl}/api/v1/tunnel/connect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ directoryPath: process.cwd(), fileName: tempFileName, isTextOnly: true }),
+      body: JSON.stringify({ pairingKey }),
     });
-    assert.strictEqual(createRes.status, 201, 'POST /api/v1/fs/create should return 201');
+    assert.strictEqual(connectRes.status, 200);
+    const { sessionToken } = await connectRes.json();
+    assert.ok(sessionToken, 'Must receive real sessionToken');
+
+    const authHeaders = {
+      Authorization: `Bearer ${sessionToken}`,
+      'Content-Type': 'application/json',
+    };
+
+    // 1. Verify C:\Projects\hyper-relay is NOT silently aliased when missing
+    if (!fs.existsSync('C:\\Projects\\hyper-relay')) {
+      const fakeWsRes = await fetch(`${baseUrl}/api/v1/workspace/select`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ path: 'C:\\Projects\\hyper-relay' }),
+      });
+      assert.strictEqual(
+        fakeWsRes.status,
+        404,
+        'Missing C:\\Projects\\hyper-relay must fail honestly with 404, never silently alias',
+      );
+      const fakeWsData = await fakeWsRes.json();
+      assert.strictEqual(fakeWsData.error?.code, 'DIRECTORY_NOT_FOUND');
+      console.log('✓ Non-existent C:\\Projects\\hyper-relay rejected honestly with 404 DIRECTORY_NOT_FOUND.');
+    }
+
+    // 2. Browse Windows folders
+    const browseRes = await fetch(
+      `${baseUrl}/api/v1/workspace/browse?path=${encodeURIComponent(tempParent)}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(browseRes.status, 200);
+    const browseData = await browseRes.json();
+    assert.ok(Array.isArray(browseData.drives) && browseData.drives.length > 0);
+    assert.ok(
+      browseData.entries.some((e: { name: string }) => e.name === 'Lazy Terminal E2E Workspace'),
+      'Browse must list subfolder with spaces',
+    );
+    console.log('✓ GET /api/v1/workspace/browse returned drives and real Windows subfolders.');
+
+    // 3. Select disposable folder with spaces as active workspace
+    const selectRes = await fetch(`${baseUrl}/api/v1/workspace/select`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ path: spaceWorkspace }),
+    });
+    assert.strictEqual(selectRes.status, 200);
+    const selectData = await selectRes.json();
+    assert.strictEqual(selectData.workspace.exists, true);
+    assert.strictEqual(selectData.workspace.isGitRepo, false);
+    console.log('✓ POST /api/v1/workspace/select selected dynamic Windows workspace with spaces.');
+
+    // 4. Empty folder listing returns empty array cleanly
+    const emptyListRes = await fetch(
+      `${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent(spaceWorkspace)}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(emptyListRes.status, 200);
+    const emptyListData = await emptyListRes.json();
+    assert.deepStrictEqual(emptyListData.files, []);
+    console.log('✓ GET /api/v1/fs/list returned [] for empty directory.');
+
+    // 5. Non-Git workspace returns graceful Git status
+    const nonGitRes = await fetch(
+      `${baseUrl}/api/v1/git/status?projectPath=${encodeURIComponent(spaceWorkspace)}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(nonGitRes.status, 200);
+    const nonGitData = await nonGitRes.json();
+    assert.strictEqual(nonGitData.isGitRepo, false);
+    assert.strictEqual(nonGitData.branch, 'local');
+    console.log('✓ GET /api/v1/git/status handled non-Git workspace gracefully.');
+
+    // 6. Create subfolder, create file inside subfolder, stat, read, conflict check, write, rename, delete
+    const mkSubRes = await fetch(`${baseUrl}/api/v1/fs/create`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        directoryPath: spaceWorkspace,
+        projectPath: spaceWorkspace,
+        fileName: 'notes dir',
+        isFolder: true,
+      }),
+    });
+    assert.strictEqual(mkSubRes.status, 201);
+    assert.ok(fs.existsSync(path.join(spaceWorkspace, 'notes dir')));
+
+    const subFolderAbs = path.join(spaceWorkspace, 'notes dir');
+    const createFileRes = await fetch(`${baseUrl}/api/v1/fs/create`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        directoryPath: subFolderAbs,
+        projectPath: spaceWorkspace,
+        fileName: 'hello-üñîçødé.txt',
+        content: 'Line 1 UTF-8 🚀\nLine 2\n',
+      }),
+    });
+    assert.strictEqual(createFileRes.status, 201);
+    const createdMeta = await createFileRes.json();
+    assert.strictEqual(createdMeta.path, 'notes dir/hello-üñîçødé.txt');
+
+    const statRes = await fetch(
+      `${baseUrl}/api/v1/fs/stat?projectPath=${encodeURIComponent(spaceWorkspace)}&filePath=${encodeURIComponent(createdMeta.path)}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(statRes.status, 200);
+    const statData = await statRes.json();
+    assert.strictEqual(statData.type, 'file');
+
+    const readRes = await fetch(
+      `${baseUrl}/api/v1/fs/read?projectPath=${encodeURIComponent(spaceWorkspace)}&filePath=${encodeURIComponent(createdMeta.path)}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(readRes.status, 200);
+    const readData = await readRes.json();
+    assert.strictEqual(readData.content, 'Line 1 UTF-8 🚀\nLine 2\n');
+    assert.ok(readData.hash.startsWith('sha256:'));
 
     const conflictRes = await fetch(`${baseUrl}/api/v1/fs/write`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({
-        filePath: tempFileName,
-        content: 'should fail due to stale hash',
+        projectPath: spaceWorkspace,
+        filePath: createdMeta.path,
+        content: 'stale write',
         expectedVersionHash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
       }),
     });
-    assert.strictEqual(conflictRes.status, 409, 'Stale version hash write must return 409 Conflict');
-    const conflictData = await conflictRes.json();
-    assert.strictEqual(conflictData.error, 'FILE_CONFLICT');
+    assert.strictEqual(conflictRes.status, 409);
+
+    const writeRes = await fetch(`${baseUrl}/api/v1/fs/write`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        projectPath: spaceWorkspace,
+        filePath: createdMeta.path,
+        content: 'Updated on Windows disk ✅\n',
+        expectedVersionHash: readData.hash,
+      }),
+    });
+    assert.strictEqual(writeRes.status, 200);
+    assert.strictEqual(
+      fs.readFileSync(path.join(subFolderAbs, 'hello-üñîçødé.txt'), 'utf8'),
+      'Updated on Windows disk ✅\n',
+    );
+
+    const renameRes = await fetch(`${baseUrl}/api/v1/fs/rename`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        projectPath: spaceWorkspace,
+        oldPath: createdMeta.path,
+        newName: 'renamed-file.txt',
+      }),
+    });
+    assert.strictEqual(renameRes.status, 200);
+    const renameData = await renameRes.json();
+    assert.strictEqual(renameData.newPath, 'notes dir/renamed-file.txt');
+    assert.ok(!fs.existsSync(path.join(subFolderAbs, 'hello-üñîçødé.txt')));
+    assert.ok(fs.existsSync(path.join(subFolderAbs, 'renamed-file.txt')));
 
     const deleteRes = await fetch(`${baseUrl}/api/v1/fs/delete`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filePath: tempFileName }),
+      headers: authHeaders,
+      body: JSON.stringify({
+        projectPath: spaceWorkspace,
+        filePath: renameData.newPath,
+      }),
     });
-    assert.strictEqual(deleteRes.status, 200, 'DELETE /api/v1/fs/delete should return 200');
-    console.log('✓ Create, 409 FILE_CONFLICT check, and Delete lifecycle verified over HTTP.');
+    assert.strictEqual(deleteRes.status, 200);
+    assert.ok(!fs.existsSync(path.join(subFolderAbs, 'renamed-file.txt')));
+    console.log('✓ Create folder/file, stat, read, 409 conflict, write, rename, and delete verified on host disk.');
 
-    // 4. Test Git Status on current project
-    const gitStatusRes = await fetch(`${baseUrl}/api/v1/git/status?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
+    // 7. Path traversal protection
+    const attackRes = await fetch(
+      `${baseUrl}/api/v1/fs/list?projectPath=${encodeURIComponent(spaceWorkspace)}&subDirectory=${encodeURIComponent('../../../../../../Windows')}`,
+      { headers: authHeaders },
+    );
+    assert.strictEqual(attackRes.status, 403);
+    console.log('✓ Path traversal blocked over HTTP API with 403 PATH_NOT_ALLOWED.');
+
+    // 8. Live Git repository status & branches on process.cwd()
+    const gitStatusRes = await fetch(
+      `${baseUrl}/api/v1/git/status?projectPath=${encodeURIComponent(process.cwd())}`,
+      { headers: authHeaders },
+    );
     assert.strictEqual(gitStatusRes.status, 200);
     const gitData = await gitStatusRes.json();
+    assert.strictEqual(gitData.isGitRepo, true);
     assert.ok(typeof gitData.branch === 'string' && gitData.branch.length > 0);
-    assert.ok(typeof gitData.dirtyFilesCount === 'number');
-    assert.ok(typeof gitData.isDirty === 'boolean');
-    console.log(`✓ GET /api/v1/git/status successfully queried repository on branch: ${gitData.branch}`);
 
-    // 5. Test Git Branches
-    const branchesRes = await fetch(`${baseUrl}/api/v1/git/branches?projectPath=${encodeURIComponent('C:\\Projects\\hyper-relay')}`);
+    const branchesRes = await fetch(
+      `${baseUrl}/api/v1/git/branches?projectPath=${encodeURIComponent(process.cwd())}`,
+      { headers: authHeaders },
+    );
     assert.strictEqual(branchesRes.status, 200);
     const branchData = await branchesRes.json();
     assert.ok(branchData.branches.includes(gitData.branch));
-    console.log(`✓ GET /api/v1/git/branches returned active branches including ${gitData.branch}.`);
+    console.log(`✓ Live Git status and branches verified on branch: ${gitData.branch}.`);
 
     console.log('\n========================================');
     console.log('  ALL HOST REST API ENDPOINTS VERIFIED! ');
     console.log('========================================\n');
   } finally {
-    server.close();
+    await host.close();
+    clearDynamicAuthorizedRoots();
+    fs.rmSync(tempParent, { recursive: true, force: true });
   }
 }
 

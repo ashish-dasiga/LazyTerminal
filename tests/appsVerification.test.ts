@@ -75,17 +75,16 @@ async function runPlaywrightAppsVerification() {
     // -------------------------------------------------------------------------
     console.log('\n[Test 2] Testing Mobile App - Directory Navigation & Changing...');
     // Switch to Mobile App
-    const mobileSwitchBtn = page.locator('button:has-text("Mobile App (Android)")').first();
-    await mobileSwitchBtn.click();
+    await page.goto(`${baseUrl}/?view=mobile`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(500);
 
     // If connection screen is visible, fill token and validate
-    const fillBtn = page.locator('button:has-text("Fill Token")').first();
-    if (await fillBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await fillBtn.click();
+    const tokenInput = page.locator('input[aria-label="Pairing Code"], input[type="text"]').first();
+    if (await tokenInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await tokenInput.fill(tokenAfter || initialHostKey);
       await page.waitForTimeout(200);
-      const validateBtn = page.locator('button:has-text("Validate & Open Mobile UI")').first();
-      await validateBtn.click();
+      const connectBtn = page.locator('button:has-text("Connect to PC"), button[type="submit"]').first();
+      await connectBtn.click();
       await page.waitForTimeout(800);
     }
 
@@ -179,8 +178,7 @@ async function runPlaywrightAppsVerification() {
     // -------------------------------------------------------------------------
     console.log('\n[Test 4] Verifying APK and EXE Downloads with Icon on Portal...');
     // Switch to Install Portal
-    const portalSwitchBtn = page.locator('button:has-text("Install Apps")').first();
-    await portalSwitchBtn.click();
+    await page.goto(`${baseUrl}/?view=portal`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(500);
 
     // Verify .EXE download link

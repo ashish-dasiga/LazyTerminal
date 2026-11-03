@@ -1,31 +1,49 @@
 import { Router, Request, Response } from 'express';
 import { execFile } from 'child_process';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
 import { validateSafePath, resolveWorkspaceProjectPath } from './fsSecurity';
-import { GitCommitRequest, GitCommitResponse, GitPushPullResponse, GitStatusResponse } from '../services/contracts';
+import {
+  GitCommitRequest,
+  GitCommitResponse,
+  GitPushPullResponse,
+  GitStatusResponse,
+} from '../services/contracts';
 
 export const gitRouter = Router();
 
 function runGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        reject(Object.assign(error, { stdout, stderr }));
-      } else {
-        resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
-      }
-    });
+    execFile(
+      'git',
+      args,
+      { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(Object.assign(error, { stdout, stderr }));
+        } else {
+          resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
+        }
+      },
+    );
   });
 }
 
-async function verifyGitRepository(repoPath: string): Promise<boolean> {
+async function resolveGitRoot(repoPath: string): Promise<string | null> {
   try {
-    const { stdout } = await runGit(['rev-parse', '--is-inside-work-tree'], repoPath);
-    return stdout === 'true';
+    const { stdout } = await runGit(['rev-parse', '--show-toplevel'], repoPath);
+    return stdout ? path.resolve(stdout) : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function getAllowedRoots(res: Response): string[] | undefined {
+  return res.locals?.hostConfig?.allowedRoots;
+}
+
+function getDefaultRoot(res: Response): string {
+  return res.locals?.hostConfig?.defaultWorkspaceRoot || process.cwd();
 }
 
 /**
@@ -34,8 +52,11 @@ async function verifyGitRepository(repoPath: string): Promise<boolean> {
  */
 gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = resolveWorkspaceProjectPath((req.query.projectPath || req.query.project || req.query.dir) as string || process.cwd());
-    const validation = validateSafePath(projectPath);
+    const projectPath = resolveWorkspaceProjectPath(
+      (req.query.projectPath || req.query.project || req.query.dir) as string,
+      getDefaultRoot(res),
+    );
+    const validation = validateSafePath(projectPath, projectPath, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({
@@ -46,21 +67,41 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
     }
 
     const repoPath = validation.resolvedPath;
-    const isGit = await verifyGitRepository(repoPath);
-
-    if (!isGit) {
+    if (!fs.existsSync(repoPath)) {
       res.status(404).json({
-        error: 'NOT_A_GIT_REPOSITORY',
-        message: `The directory "${projectPath}" is not a Git repository.`,
+        error: 'DIRECTORY_NOT_FOUND',
+        message: `Workspace directory does not exist on Windows PC: ${projectPath}`,
       });
       return;
     }
 
-    // Run git status porcelain with branch info
+    const gitRoot = await resolveGitRoot(repoPath);
+
+    if (!gitRoot) {
+      const nonGitResponse: GitStatusResponse = {
+        isGitRepo: false,
+        projectPath: repoPath,
+        branch: 'local',
+        isDirty: false,
+        dirtyFilesCount: 0,
+        ahead: 0,
+        behind: 0,
+        lastCommit: {
+          hash: '-',
+          message: 'Local folder (not a Git repository)',
+          author: '',
+          time: '',
+        },
+        changedFiles: [],
+      };
+      res.json(nonGitResponse);
+      return;
+    }
+
     const { stdout: statusOutput } = await runGit(['status', '--porcelain=v1', '-b'], repoPath);
 
-    const lines = statusOutput.split('\n').filter((l) => l.trim().length > 0);
-    let branch = 'unknown';
+    const lines = statusOutput.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    let branch = 'HEAD';
     let ahead = 0;
     let behind = 0;
 
@@ -68,11 +109,15 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
 
     for (const line of lines) {
       if (line.startsWith('##')) {
-        // e.g. "## main...origin/main [ahead 1, behind 2]" or "## No commits yet on main"
         const branchHeader = line.substring(2).trim();
-        const branchMatch = branchHeader.match(/^([^\s.]+)/);
-        if (branchMatch) {
-          branch = branchMatch[1];
+        const noCommitsMatch = branchHeader.match(/No commits yet on ([^\s.]+)/i);
+        if (noCommitsMatch) {
+          branch = noCommitsMatch[1];
+        } else {
+          const branchMatch = branchHeader.match(/^([^\s.]+)/);
+          if (branchMatch) {
+            branch = branchMatch[1];
+          }
         }
 
         const aheadMatch = branchHeader.match(/ahead (\d+)/);
@@ -92,7 +137,6 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
             staged: false,
           });
         } else {
-          // Check staged (X column)
           if (x !== ' ' && x !== '?') {
             changedFiles.push({
               path: filePath,
@@ -100,7 +144,6 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
               staged: true,
             });
           }
-          // Check unstaged (Y column)
           if (y !== ' ' && y !== '?') {
             changedFiles.push({
               path: filePath,
@@ -112,7 +155,6 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    // Get last commit info
     let lastCommit = {
       hash: '',
       message: 'No commits yet',
@@ -123,7 +165,7 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
     try {
       const { stdout: logOutput } = await runGit(
         ['log', '-1', '--format=%H%x00%s%x00%an%x00%cr'],
-        repoPath
+        repoPath,
       );
       if (logOutput) {
         const [hash, message, author, time] = logOutput.split('\0');
@@ -139,7 +181,9 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
     }
 
     const response: GitStatusResponse = {
+      isGitRepo: true,
       projectPath: repoPath,
+      rootPath: gitRoot,
       branch,
       isDirty: changedFiles.length > 0,
       dirtyFilesCount: changedFiles.length,
@@ -165,17 +209,26 @@ gitRouter.get('/status', async (req: Request, res: Response): Promise<void> => {
  */
 gitRouter.get('/diff', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = (req.query.projectPath as string) || process.cwd();
+    const projectPath = resolveWorkspaceProjectPath(
+      req.query.projectPath as string,
+      getDefaultRoot(res),
+    );
     const filePath = req.query.filePath as string | undefined;
     const isStaged = req.query.staged === 'true';
 
-    const validation = validateSafePath(projectPath);
+    const validation = validateSafePath(projectPath, projectPath, getAllowedRoots(res));
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
       return;
     }
 
     const repoPath = validation.resolvedPath;
+    const gitRoot = await resolveGitRoot(repoPath);
+    if (!gitRoot) {
+      res.json({ diff: '' });
+      return;
+    }
+
     const args = ['diff'];
     if (isStaged) {
       args.push('--cached');
@@ -201,8 +254,9 @@ gitRouter.get('/diff', async (req: Request, res: Response): Promise<void> => {
  */
 gitRouter.post('/stage', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, files } = req.body;
-    const validation = validateSafePath(projectPath || process.cwd());
+    const { projectPath, files } = req.body || {};
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
@@ -235,8 +289,9 @@ gitRouter.post('/stage', async (req: Request, res: Response): Promise<void> => {
  */
 gitRouter.post('/unstage', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, files } = req.body;
-    const validation = validateSafePath(projectPath || process.cwd());
+    const { projectPath, files } = req.body || {};
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
@@ -247,10 +302,8 @@ gitRouter.post('/unstage', async (req: Request, res: Response): Promise<void> =>
     const targetFiles = Array.isArray(files) && files.length > 0 ? files : ['.'];
 
     try {
-      // Modern Git: restore --staged
       await runGit(['restore', '--staged', '--', ...targetFiles], repoPath);
     } catch {
-      // Legacy fallback: reset HEAD
       await runGit(['reset', 'HEAD', '--', ...targetFiles], repoPath);
     }
 
@@ -270,14 +323,18 @@ gitRouter.post('/unstage', async (req: Request, res: Response): Promise<void> =>
  */
 gitRouter.post('/commit', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, message, amend } = req.body as GitCommitRequest;
+    const { projectPath, message, amend } = (req.body || {}) as GitCommitRequest;
 
     if (!message || !message.trim()) {
-      res.status(400).json({ error: 'INVALID_COMMIT_MESSAGE', message: 'Commit message is required.' });
+      res.status(400).json({
+        error: 'INVALID_COMMIT_MESSAGE',
+        message: 'Commit message is required.',
+      });
       return;
     }
 
-    const validation = validateSafePath(projectPath || process.cwd());
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
       return;
@@ -316,14 +373,17 @@ gitRouter.post('/commit', async (req: Request, res: Response): Promise<void> => 
  */
 gitRouter.post('/checkout', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, branchName, createNew } = req.body;
+    const { projectPath } = req.body || {};
+    const branchName = req.body?.branchName || req.body?.branch;
+    const createNew = Boolean(req.body?.createNew);
 
     if (!branchName || typeof branchName !== 'string') {
       res.status(400).json({ error: 'INVALID_BRANCH', message: 'branchName is required.' });
       return;
     }
 
-    const validation = validateSafePath(projectPath || process.cwd());
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
       return;
@@ -331,7 +391,6 @@ gitRouter.post('/checkout', async (req: Request, res: Response): Promise<void> =
 
     const repoPath = validation.resolvedPath;
 
-    // Validate branch name against git ref format
     try {
       await runGit(['check-ref-format', '--branch', branchName.trim()], repoPath);
     } catch {
@@ -342,7 +401,9 @@ gitRouter.post('/checkout', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const args = createNew ? ['checkout', '-b', branchName.trim()] : ['checkout', branchName.trim()];
+    const args = createNew
+      ? ['checkout', '-b', branchName.trim()]
+      : ['checkout', branchName.trim()];
     const { stdout, stderr } = await runGit(args, repoPath);
 
     res.json({
@@ -365,8 +426,9 @@ gitRouter.post('/checkout', async (req: Request, res: Response): Promise<void> =
  */
 gitRouter.post('/push', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, branch } = req.body;
-    const validation = validateSafePath(projectPath || process.cwd());
+    const { projectPath, branch } = req.body || {};
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
@@ -404,8 +466,9 @@ gitRouter.post('/push', async (req: Request, res: Response): Promise<void> => {
  */
 gitRouter.post('/pull', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { projectPath, branch } = req.body;
-    const validation = validateSafePath(projectPath || process.cwd());
+    const { projectPath, branch } = req.body || {};
+    const targetProject = resolveWorkspaceProjectPath(projectPath, getDefaultRoot(res));
+    const validation = validateSafePath(targetProject, targetProject, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
@@ -443,8 +506,11 @@ gitRouter.post('/pull', async (req: Request, res: Response): Promise<void> => {
  */
 gitRouter.get('/branches', async (req: Request, res: Response): Promise<void> => {
   try {
-    const projectPath = (req.query.projectPath as string) || process.cwd();
-    const validation = validateSafePath(projectPath);
+    const projectPath = resolveWorkspaceProjectPath(
+      req.query.projectPath as string,
+      getDefaultRoot(res),
+    );
+    const validation = validateSafePath(projectPath, projectPath, getAllowedRoots(res));
 
     if (!validation.isValid) {
       res.status(403).json({ error: 'PATH_NOT_ALLOWED', message: validation.errorMessage });
@@ -452,12 +518,21 @@ gitRouter.get('/branches', async (req: Request, res: Response): Promise<void> =>
     }
 
     const repoPath = validation.resolvedPath;
-    const { stdout } = await runGit(['branch', '--list', '--format=%(refname:short)%00%(HEAD)'], repoPath);
+    const gitRoot = await resolveGitRoot(repoPath);
+    if (!gitRoot) {
+      res.json({ branches: [], currentBranch: '' });
+      return;
+    }
+
+    const { stdout } = await runGit(
+      ['branch', '--list', '--format=%(refname:short)%00%(HEAD)'],
+      repoPath,
+    );
 
     const branches: string[] = [];
     let currentBranch = '';
 
-    const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
+    const lines = stdout.split(/\r?\n/).filter((l) => l.trim().length > 0);
     for (const line of lines) {
       const [name, isHead] = line.split('\0');
       if (name) {

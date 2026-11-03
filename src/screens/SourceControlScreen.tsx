@@ -1,28 +1,29 @@
 import React, { useState, useEffect } from 'react';
 import { useRelay } from '../context/RelayContext';
 import { getBackendAdapter } from '../services';
-import { 
-  GitBranch, 
-  GitCommit, 
-  Check, 
-  ArrowUp, 
-  ArrowDown, 
+import {
+  GitBranch,
+  GitCommit,
+  Check,
+  ArrowUp,
+  ArrowDown,
   FileCode,
   Terminal,
   Loader2,
   CheckCircle2,
   AlertCircle,
   X,
-  FileDiff
+  FileDiff,
+  Folder,
 } from 'lucide-react';
 
 export function SourceControlScreen() {
-  const { 
-    activeProject, 
-    executeCommand, 
+  const {
+    activeProject,
+    executeCommand,
     setMobileNav,
     gitStatus,
-    refreshGitStatus
+    refreshGitStatus,
   } = useRelay();
 
   const [commitMessage, setCommitMessage] = useState('');
@@ -35,31 +36,29 @@ export function SourceControlScreen() {
   const [gitError, setGitError] = useState<string | null>(null);
   const [activeDiff, setActiveDiff] = useState<{ file: string; content: string } | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+  const [branches, setBranches] = useState<string[]>([]);
 
-  const [branches, setBranches] = useState<string[]>([
-    'main',
-    'ashritha',
-    'deeksha',
-    'ashish',
-    'shreya'
-  ]);
+  const isNonGitWorkspace =
+    gitStatus?.isGitRepo === false || activeProject.isGitRepo === false;
 
-  // Sync git status on screen load
   useEffect(() => {
+    if (!activeProject.path) return;
+    setGitError(null);
     refreshGitStatus().catch(() => {});
-    // Try fetching branches from host
+
     const fetchBranches = async () => {
       try {
-        const httpGit = getBackendAdapter().git as { getBranches?: (p: string) => Promise<{ branches: string[]; currentBranch: string }> };
-        if (httpGit.getBranches) {
-          const res = await httpGit.getBranches(activeProject.path);
-          if (res.branches && res.branches.length > 0) {
-            setBranches(res.branches);
-            if (res.currentBranch) setSelectedBranch(res.currentBranch);
-          }
+        const gitSvc = getBackendAdapter().git;
+        if (!gitSvc.getBranches) return;
+        const res = await gitSvc.getBranches(activeProject.path);
+        if (Array.isArray(res.branches)) {
+          setBranches(res.branches);
+        }
+        if (res.currentBranch) {
+          setSelectedBranch(res.currentBranch);
         }
       } catch {
-        // Fallback to initial branches
+        setBranches([]);
       }
     };
     fetchBranches();
@@ -67,57 +66,48 @@ export function SourceControlScreen() {
 
   const handleStageAllAndCommit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!commitMessage.trim()) return;
+    if (!commitMessage.trim() || isNonGitWorkspace) return;
     setIsCommitting(true);
     setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as {
-        stageFiles: (files: string[], projectPath?: string) => Promise<void>;
-        commit: (req: { projectPath: string; message: string }) => Promise<unknown>;
-      };
-      await httpGit.stageFiles(['.'], activeProject.path);
-      await httpGit.commit({
+      const gitSvc = getBackendAdapter().git;
+      await gitSvc.stageFiles(['.'], activeProject.path);
+      await gitSvc.commit({
         projectPath: activeProject.path,
         message: commitMessage.trim(),
       });
       setCommitMessage('');
       await refreshGitStatus();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Commit failed';
-      setGitError(msg);
-      // Fallback through terminal
-      await executeCommand(`git add -A`);
-      await executeCommand(`git commit -m "${commitMessage.trim()}"`);
+      setGitError(err instanceof Error ? err.message : 'Commit failed on Windows host');
     } finally {
       setIsCommitting(false);
     }
   };
 
   const handlePush = async () => {
+    if (isNonGitWorkspace) return;
     setIsPushing(true);
     setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as { push: (b?: string, p?: string) => Promise<unknown> };
-      await httpGit.push(undefined, activeProject.path);
+      await getBackendAdapter().git.push(undefined, activeProject.path);
       await refreshGitStatus();
     } catch (err: unknown) {
-      setGitError(err instanceof Error ? err.message : 'Push failed');
-      await executeCommand('git push');
+      setGitError(err instanceof Error ? err.message : 'Git push failed on Windows host');
     } finally {
       setIsPushing(false);
     }
   };
 
   const handlePull = async () => {
+    if (isNonGitWorkspace) return;
     setIsPulling(true);
     setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as { pull: (b?: string, p?: string) => Promise<unknown> };
-      await httpGit.pull(undefined, activeProject.path);
+      await getBackendAdapter().git.pull(undefined, activeProject.path);
       await refreshGitStatus();
     } catch (err: unknown) {
-      setGitError(err instanceof Error ? err.message : 'Pull failed');
-      await executeCommand('git pull');
+      setGitError(err instanceof Error ? err.message : 'Git pull failed on Windows host');
     } finally {
       setIsPulling(false);
     }
@@ -126,16 +116,12 @@ export function SourceControlScreen() {
   const handleSwitchBranch = async (branch: string) => {
     setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
-      await httpGit.switchBranch(branch, activeProject.path, false);
+      await getBackendAdapter().git.switchBranch(branch, activeProject.path, false);
       setSelectedBranch(branch);
       setShowBranchModal(false);
       await refreshGitStatus();
     } catch (err: unknown) {
       setGitError(err instanceof Error ? err.message : 'Failed to switch branch');
-      await executeCommand(`git checkout ${branch}`);
-      setSelectedBranch(branch);
-      setShowBranchModal(false);
     }
   };
 
@@ -145,8 +131,7 @@ export function SourceControlScreen() {
     if (!targetBranch) return;
     setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as { switchBranch: (b: string, p?: string, createNew?: boolean) => Promise<void> };
-      await httpGit.switchBranch(targetBranch, activeProject.path, true);
+      await getBackendAdapter().git.switchBranch(targetBranch, activeProject.path, true);
       setBranches((prev) => (prev.includes(targetBranch) ? prev : [...prev, targetBranch]));
       setSelectedBranch(targetBranch);
       setNewBranchInput('');
@@ -159,24 +144,56 @@ export function SourceControlScreen() {
 
   const handleInspectDiff = async (fileName: string) => {
     setIsLoadingDiff(true);
+    setGitError(null);
     try {
-      const httpGit = getBackendAdapter().git as { getDiff?: (p: string, f?: string) => Promise<string> };
-      if (httpGit.getDiff) {
-        const diff = await httpGit.getDiff(activeProject.path, fileName);
-        setActiveDiff({ file: fileName, content: diff || 'No working directory changes for this file.' });
-      } else {
-        await executeCommand(`git diff ${fileName}`);
-        setMobileNav('terminal');
-      }
-    } catch {
-      await executeCommand(`git diff ${fileName}`);
-      setMobileNav('terminal');
+      const gitSvc = getBackendAdapter().git;
+      const diff = gitSvc.getDiff ? await gitSvc.getDiff(activeProject.path, fileName) : '';
+      setActiveDiff({
+        file: fileName,
+        content: diff || 'No working directory diff output for this file.',
+      });
+    } catch (err: unknown) {
+      setGitError(err instanceof Error ? err.message : 'Failed to inspect diff');
     } finally {
       setIsLoadingDiff(false);
     }
   };
 
-  // Files to display: prefer real gitStatus.changedFiles, fallback to activeProject.files
+  if (isNonGitWorkspace) {
+    return (
+      <div
+        className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#121419] text-zinc-100 font-sans"
+        data-testid="git-non-repo-state"
+      >
+        <div className="flex items-center gap-2">
+          <GitBranch className="w-4 h-4 text-zinc-400" />
+          <h2 className="text-sm font-semibold text-zinc-100 tracking-tight">Source Control</h2>
+        </div>
+
+        <div className="p-5 bg-[#16181e] border border-[#252831] rounded-lg text-center space-y-2.5">
+          <Folder className="w-6 h-6 mx-auto text-zinc-500" />
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-zinc-200">Not a Git Repository</p>
+            <p className="text-[11px] font-mono text-zinc-400 break-all">
+              {activeProject.path || activeProject.name}
+            </p>
+            <p className="text-[11px] text-zinc-500">
+              This Windows workspace folder does not contain a Git repository. Explorer and PowerShell sessions work normally.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMobileNav('terminal')}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#1c1f26] hover:bg-[#232731] border border-[#2b303b] rounded-md text-xs text-zinc-200 cursor-pointer transition-colors"
+          >
+            <Terminal className="w-3.5 h-3.5 text-blue-400" />
+            <span>Open Terminal</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const dirtyFiles = gitStatus
     ? gitStatus.changedFiles.map((cf) => ({
         name: cf.path,
@@ -336,9 +353,11 @@ export function SourceControlScreen() {
                 <span className="text-zinc-200 truncate">{file.name}</span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                  file.gitStatus === 'M' ? 'text-amber-400' : 'text-zinc-400'
-                }`}>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    file.gitStatus === 'M' ? 'text-amber-400' : 'text-zinc-400'
+                  }`}
+                >
                   {file.gitStatus === 'M' ? 'Modified' : 'Untracked'}
                 </span>
                 <button
@@ -392,13 +411,21 @@ export function SourceControlScreen() {
           <GitCommit className="w-3.5 h-3.5 text-zinc-500" />
           <span>Latest Commit on {currentBranchName.replace('*', '')}</span>
         </div>
-        <div className="text-zinc-200 font-medium">{lastCommitInfo.message || 'No commit message'}</div>
+        <div className="text-zinc-200 font-medium">{lastCommitInfo.message || 'No commits yet'}</div>
         <div className="text-[11px] text-zinc-500 font-mono flex items-center gap-2 pt-0.5">
           <span>{lastCommitInfo.hash || 'HEAD'}</span>
-          <span>·</span>
-          <span>{lastCommitInfo.author || 'Lazy Terminal'}</span>
-          <span>·</span>
-          <span>{lastCommitInfo.time || 'just now'}</span>
+          {lastCommitInfo.author ? (
+            <>
+              <span>·</span>
+              <span>{lastCommitInfo.author}</span>
+            </>
+          ) : null}
+          {lastCommitInfo.time ? (
+            <>
+              <span>·</span>
+              <span>{lastCommitInfo.time}</span>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -418,20 +445,28 @@ export function SourceControlScreen() {
             <div className="space-y-1">
               <span className="text-xs text-zinc-400">Available Branches:</span>
               <div className="space-y-1 max-h-40 overflow-y-auto">
-                {branches.map((b) => (
-                  <button
-                    key={b}
-                    onClick={() => handleSwitchBranch(b)}
-                    className={`w-full p-2 rounded-md text-left text-xs font-mono flex items-center justify-between cursor-pointer ${
-                      selectedBranch.includes(b)
-                        ? 'bg-[#222631] text-white border border-[#313645]'
-                        : 'bg-[#14161c] text-zinc-300 hover:bg-[#1f222b]'
-                    }`}
-                  >
-                    <span>{b}</span>
-                    {selectedBranch.includes(b) && <Check className="w-3 h-3 text-blue-400" />}
-                  </button>
-                ))}
+                {branches.length === 0 ? (
+                  <div className="p-2 text-xs font-mono text-zinc-500">
+                    No local branches found yet.
+                  </div>
+                ) : (
+                  branches.map((b) => (
+                    <button
+                      key={b}
+                      onClick={() => handleSwitchBranch(b)}
+                      className={`w-full p-2 rounded-md text-left text-xs font-mono flex items-center justify-between cursor-pointer ${
+                        selectedBranch === b || currentBranchName === b
+                          ? 'bg-[#222631] text-white border border-[#313645]'
+                          : 'bg-[#14161c] text-zinc-300 hover:bg-[#1f222b]'
+                      }`}
+                    >
+                      <span>{b}</span>
+                      {(selectedBranch === b || currentBranchName === b) && (
+                        <Check className="w-3 h-3 text-blue-400" />
+                      )}
+                    </button>
+                  ))
+                )}
               </div>
             </div>
 

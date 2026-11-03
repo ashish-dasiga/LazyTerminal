@@ -1,5 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { startHostCompanionServer, RunningHostServer } from '../companionServer';
 import { WindowsHostBackendAdapter } from '../../services/hostClientAdapter';
@@ -11,13 +13,17 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
   let hostServer: RunningHostServer;
   let baseUrl: string;
 
+  let tempTestRoot: string;
+
   before(async () => {
+    const rawTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-pwsh-suite-'));
+    tempTestRoot = fs.realpathSync.native ? fs.realpathSync.native(rawTmp) : fs.realpathSync(rawTmp);
     hostServer = await startHostCompanionServer(
       {
-        hostPort: 0, // bind to ephemeral available port for isolated testing
+        hostPort: 0,
         hostBind: '127.0.0.1',
         defaultWorkspaceRoot: process.cwd(),
-        allowedRoots: [process.cwd()],
+        allowedRoots: [process.cwd(), tempTestRoot],
         pairingTtlSeconds: 300,
         pairingMaxAttempts: 4,
         pairingLockoutMs: 10_000,
@@ -32,6 +38,9 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     if (hostServer) {
       await hostServer.close();
     }
+    if (tempTestRoot && fs.existsSync(tempTestRoot)) {
+      fs.rmSync(tempTestRoot, { recursive: true, force: true });
+    }
   });
 
   it('generates a fresh 6-digit pairing key on startup and redacts secrets from logs', () => {
@@ -39,7 +48,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.match(keyInfo.pairingKey, /^\d{3}-\d{3}$/);
     assert.ok(keyInfo.expiresInSeconds > 0);
 
-    // Log a message containing a secret and verify redaction
     hostServer.companion.logger.info(`Test log with key ${keyInfo.pairingKey}`, {
       pairingKey: keyInfo.pairingKey,
       sessionToken: 'lt_sess_secret123',
@@ -50,12 +58,15 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.ok(!logs.includes('lt_sess_secret123'), 'Session token must never appear in logs');
   });
 
-  it('rejects unauthenticated requests to terminal and host status endpoints with 401', async () => {
+  it('rejects unauthenticated requests to terminal, filesystem, git, cli, and host status endpoints with 401', async () => {
     const endpoints = [
       { method: 'GET', path: '/api/v1/pty/sessions' },
       { method: 'POST', path: '/api/v1/pty/sessions/sess-pwsh/input', body: { command: 'whoami' } },
       { method: 'GET', path: '/api/v1/host/status' },
       { method: 'POST', path: '/api/v1/tunnel/disconnect' },
+      { method: 'GET', path: `/api/v1/fs/list?projectPath=${encodeURIComponent(process.cwd())}` },
+      { method: 'GET', path: `/api/v1/git/status?projectPath=${encodeURIComponent(process.cwd())}` },
+      { method: 'GET', path: '/api/v1/cli/tools' },
     ];
 
     for (const ep of endpoints) {
@@ -84,24 +95,20 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const initialKey = pm.getCurrentKeyEnvelope().pairingKey;
     assert.match(initialKey, /^\d{3}-\d{3}$/);
 
-    // 1. Invalid key attempts trigger rate limit after 3 failures
     assert.equal(pm.validatePairingKey({ pairingKey: '000-000' }).isValid, false);
     assert.equal(pm.validatePairingKey({ pairingKey: '000-001' }).isValid, false);
     const thirdFail = pm.validatePairingKey({ pairingKey: '000-002' });
     assert.equal(thirdFail.isValid, false);
     assert.match(thirdFail.errorMessage || '', /Too many failed pairing attempts/);
 
-    // Even valid key is blocked while locked out
     const blockedValid = pm.validatePairingKey({ pairingKey: initialKey });
     assert.equal(blockedValid.isValid, false);
 
-    // 2. Rotating key clears lockout and invalidates old key
     const rotated = pm.rotatePairingKey('test_rotate');
     assert.notEqual(rotated.pairingKey, initialKey);
     assert.equal(pm.validatePairingKey({ pairingKey: initialKey }).isValid, false);
     assert.equal(pm.validatePairingKey({ pairingKey: rotated.pairingKey }).isValid, true);
 
-    // 3. Advancing clock past TTL expires key
     fakeNow += 61_000;
     const expiredRes = pm.validatePairingKey({ pairingKey: rotated.pairingKey });
     assert.equal(expiredRes.isValid, false);
@@ -112,11 +119,9 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const adapter = new WindowsHostBackendAdapter(baseUrl);
     const keyEnvelope = await adapter.connection.fetchActiveHostKey();
 
-    // 1. Wrong key fails pairing
     const badConnect = await adapter.connection.connectToHost({ pairingKey: '000-000' });
     assert.equal(badConnect.success, false);
 
-    // 2. Valid key establishes authenticated session
     const goodConnect = await adapter.connection.connectToHost({
       pairingKey: keyEnvelope.pairingKey,
     });
@@ -124,7 +129,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.ok(goodConnect.sessionToken.startsWith('lt_sess_'));
     assert.equal(goodConnect.device.isOnline, true);
 
-    // 3. Execute harmless command and verify real output
     const exec1 = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Write-Output "LAZY_TERMINAL_REAL_HOST_OK"',
@@ -137,7 +141,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       `Expected real output, got: ${combinedOut1}`
     );
 
-    // 4. Verify persistent state (variable + working directory) across commands in same session
     await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: '$ltPersistVar = "PERSISTED_VALUE_99"; Set-Location src',
@@ -156,7 +159,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       combinedOut2.toLowerCase().includes(path.join(process.cwd(), 'src').toLowerCase())
     );
 
-    // Return to workspace root
     await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: `Set-Location -LiteralPath '${process.cwd().replace(/'/g, "''")}'`,
@@ -169,7 +171,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const keyEnvelope = await adapter.connection.fetchActiveHostKey();
     await adapter.connection.connectToHost({ pairingKey: keyEnvelope.pairingKey });
 
-    // 1. Unauthorized working directory outside workspace root
     const unauthorizedDirRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Write-Output "should-not-run"',
@@ -178,7 +179,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.equal(unauthorizedDirRes.exitCode, 126);
     assert.match(unauthorizedDirRes.lines[0]?.content || '', /outside authorized workspace roots/i);
 
-    // 2. Destructive command blocked by command guard
     const dangerousCmdRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Stop-Computer -Force',
@@ -187,7 +187,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     assert.equal(dangerousCmdRes.exitCode, 126);
     assert.match(dangerousCmdRes.lines[0]?.content || '', /SECURITY GUARD/);
 
-    // 3. In-shell directory traversal outside allowed root is reverted
     const escapeRes = await adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Set-Location C:\\Windows',
@@ -206,7 +205,6 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const key1 = (await adapter.connection.fetchActiveHostKey()).pairingKey;
     await adapter.connection.connectToHost({ pairingKey: key1 });
 
-    // Start a slow command and cancel it via SIGINT
     const slowPromise = adapter.terminal.executeCommand({
       sessionId: 'sess-pwsh',
       command: 'Start-Sleep -Seconds 8; Write-Output "FINISHED_SLOW"',
@@ -221,16 +219,13 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
     const slowText = slowRes.lines.map((l) => l.content).join('\n');
     assert.ok(!slowText.includes('FINISHED_SLOW'));
 
-    // Restarting daemon invalidates old pairing key and active session token
     await adapter.connection.setHostServerStatus('restart');
     const key2 = (await adapter.connection.fetchActiveHostKey()).pairingKey;
     assert.notEqual(key2, key1);
 
-    // Old key must be rejected after restart
     const oldKeyConnect = await adapter.connection.connectToHost({ pairingKey: key1 });
     assert.equal(oldKeyConnect.success, false);
 
-    // New key succeeds
     const newKeyConnect = await adapter.connection.connectToHost({ pairingKey: key2 });
     assert.equal(newKeyConnect.success, true);
   });
@@ -286,5 +281,123 @@ describe('Lazy Terminal — Windows Host Companion & Terminal Sessions', () => {
       sseEvents.join('').includes('SSE_STREAM_TEST_OK'),
       'Expected SSE stream to receive real-time terminal output line'
     );
+  });
+
+  it('supports full persistent Windows PowerShell lifecycle: spaces, Unicode, standard commands, errors, multi-session isolation, and cleanup', async () => {
+    const adapter = new WindowsHostBackendAdapter(baseUrl);
+    const keyEnvelope = await adapter.connection.fetchActiveHostKey();
+    await adapter.connection.connectToHost({ pairingKey: keyEnvelope.pairingKey });
+
+    // Create two independent PowerShell sessions in tempTestRoot
+    const sessA = await adapter.terminal.createSession({
+      title: 'PWSH Isolation A',
+      type: 'powershell',
+      workingDir: tempTestRoot,
+    });
+    const sessB = await adapter.terminal.createSession({
+      title: 'PWSH Isolation B',
+      type: 'powershell',
+      workingDir: tempTestRoot,
+    });
+    assert.notEqual(sessA.id, sessB.id);
+
+    // 1. Standard PowerShell commands: whoami, pwd, Get-Location, mkdir with spaces, cd, New-Item Unicode, Get-Content, ls, dir, Get-ChildItem
+    const whoamiRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'whoami',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(whoamiRes.exitCode, 0);
+    assert.ok(whoamiRes.lines.some((l) => l.content.includes('\\') || l.content.trim().length > 0));
+
+    const mkRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'mkdir "Sub Folder With Spaces" | Out-Null; cd "Sub Folder With Spaces"; pwd',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(mkRes.exitCode, 0);
+    const expectedSubDir = path.join(tempTestRoot, 'Sub Folder With Spaces');
+    assert.equal(mkRes.workingDir?.toLowerCase(), expectedSubDir.toLowerCase());
+    assert.ok(fs.existsSync(expectedSubDir));
+
+    const unicodeCmd =
+      'New-Item -Path "üñîçødé notes.txt" -ItemType File -Force | Out-Null; Set-Content -LiteralPath "üñîçødé notes.txt" -Value "Hello Windows PowerShell 🚀" -NoNewline; Get-Content -LiteralPath "üñîçødé notes.txt"';
+    const fileRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: unicodeCmd,
+      workingDir: expectedSubDir,
+    });
+    assert.equal(fileRes.exitCode, 0);
+    assert.ok(
+      fileRes.lines.map((l) => l.content).join('\n').includes('Hello Windows PowerShell 🚀'),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(expectedSubDir, 'üñîçødé notes.txt'), 'utf8').replace(/^\uFEFF/, ''),
+      'Hello Windows PowerShell 🚀',
+    );
+
+    for (const listCmd of ['ls', 'dir', 'Get-ChildItem']) {
+      const lsRes = await adapter.terminal.executeCommand({
+        sessionId: sessA.id,
+        command: listCmd,
+        workingDir: expectedSubDir,
+      });
+      assert.equal(lsRes.exitCode, 0);
+      assert.ok(
+        lsRes.lines.map((l) => l.content).join('\n').includes('üñîçødé notes.txt'),
+        `${listCmd} should list created Unicode file`,
+      );
+    }
+
+    // 2. Session A sets variable; verify Session B is completely isolated (different cwd & no variable bleed)
+    await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: '$isolatedSecret = "SESSION_A_ONLY"',
+      workingDir: expectedSubDir,
+    });
+
+    const checkB = await adapter.terminal.executeCommand({
+      sessionId: sessB.id,
+      command: 'Write-Output "VAR=$($isolatedSecret)|CWD=$((Get-Location).Path)"',
+      workingDir: tempTestRoot,
+    });
+    assert.equal(checkB.exitCode, 0);
+    const outB = checkB.lines.map((l) => l.content).join('\n');
+    assert.ok(outB.includes('VAR=|'), `Session B must not see Session A variable, got: ${outB}`);
+    assert.ok(outB.toLowerCase().includes(tempTestRoot.toLowerCase()));
+    assert.ok(!outB.toLowerCase().includes('sub folder with spaces'));
+
+    // 3. Non-zero exit codes & syntax errors recover cleanly without breaking persistent state
+    const exitCodeRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'cmd /c "exit 9"',
+      workingDir: expectedSubDir,
+    });
+    assert.equal(exitCodeRes.exitCode, 9);
+
+    const syntaxErrRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'if (',
+      workingDir: expectedSubDir,
+    });
+    assert.notEqual(syntaxErrRes.exitCode, 0);
+    assert.ok(syntaxErrRes.lines.some((l) => l.type === 'error'));
+
+    // Verify Session A still remembers $isolatedSecret and its workingDir after errors + cd ..
+    const recoverRes = await adapter.terminal.executeCommand({
+      sessionId: sessA.id,
+      command: 'cd ..; echo "$isolatedSecret|$((Get-Location).Path)"',
+      workingDir: expectedSubDir,
+    });
+    assert.equal(recoverRes.exitCode, 0);
+    const recoverText = recoverRes.lines.map((l) => l.content).join('\n');
+    assert.ok(recoverText.includes('SESSION_A_ONLY'));
+    assert.equal(recoverRes.workingDir?.toLowerCase(), tempTestRoot.toLowerCase());
+
+    // 4. Close both sessions and verify cleanup
+    await adapter.terminal.closeSession(sessA.id);
+    await adapter.terminal.closeSession(sessB.id);
+    const remaining = await adapter.terminal.listSessions();
+    assert.ok(!remaining.some((s) => s.id === sessA.id || s.id === sessB.id));
   });
 });

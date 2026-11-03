@@ -1,6 +1,7 @@
-import { spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, spawnSync, ChildProcess, ChildProcessWithoutNullStreams } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import {
   CreateSessionRequest,
@@ -15,10 +16,16 @@ import {
   resolveAuthorizedWorkingDir,
 } from './config';
 import { validateCommandSafety } from './commandGuard';
+import {
+  executeAiProviderTurn,
+  inspectProviderAuth,
+  SupportedAiProviderId,
+} from './aiProviders';
 import { HostLogger } from './logger';
 
 interface KnownCliMeta {
   cliName: string;
+  binaryCandidates: string[];
   toolName: string;
   installCommand: string;
 }
@@ -26,23 +33,33 @@ interface KnownCliMeta {
 const KNOWN_AI_CLIS: Record<string, KnownCliMeta> = {
   claude: {
     cliName: 'claude',
+    binaryCandidates: ['claude.exe', 'claude.cmd', 'claude'],
     toolName: 'Claude Code',
     installCommand: 'npm install -g @anthropic-ai/claude-code',
   },
   codex: {
     cliName: 'codex',
+    binaryCandidates: ['codex.cmd', 'codex.exe', 'codex'],
     toolName: 'OpenAI Codex CLI',
-    installCommand: 'npm install -g @openai/codex-cli',
+    installCommand: 'npm install -g @openai/codex',
   },
   gemini: {
     cliName: 'gemini',
+    binaryCandidates: ['gemini.cmd', 'gemini.exe', 'gemini'],
     toolName: 'Gemini CLI',
     installCommand: 'npm install -g @google/gemini-cli',
   },
   antigravity: {
-    cliName: 'antigravity',
-    toolName: 'Antigravity Agent Runtime',
-    installCommand: 'antigravity-daemon --host 127.0.0.1:9872',
+    cliName: 'agy',
+    binaryCandidates: ['agy.exe', 'agy.cmd', 'antigravity.exe', 'agy'],
+    toolName: 'Antigravity',
+    installCommand: 'agy --version',
+  },
+  agy: {
+    cliName: 'agy',
+    binaryCandidates: ['agy.exe', 'agy.cmd', 'agy'],
+    toolName: 'Antigravity',
+    installCommand: 'agy --version',
   },
 };
 
@@ -61,13 +78,62 @@ interface PendingCommandExecution {
 interface ManagedSessionState {
   session: TerminalSession;
   proc: ChildProcessWithoutNullStreams | null;
+  activeAiChild?: ChildProcess | null;
+  providerSessionId?: string;
+  aiCancelled?: boolean;
+  readyPromise: Promise<void> | null;
+  initBuffer: string;
+  isInitializing: boolean;
   pending: PendingCommandExecution | null;
   emitter: EventEmitter;
   seqCounter: number;
 }
 
-function findExecutableOnPath(binaryNames: string[]): string | null {
-  const pathEnv = process.env.PATH || process.env.Path || '';
+function isAiProviderSessionType(
+  type: TerminalSession['type'],
+): type is SupportedAiProviderId {
+  return (
+    type === 'claude' ||
+    type === 'gemini' ||
+    type === 'codex' ||
+    type === 'antigravity'
+  );
+}
+
+function getExtraUserBinDirs(): string[] {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  const candidates = [
+    path.join(home, '.local', 'bin'),
+    path.join(appData, 'npm'),
+    path.join(localAppData, 'agy', 'bin'),
+    path.join(localAppData, 'Programs', 'Antigravity', 'bin'),
+  ];
+  return candidates.filter((dir) => {
+    try {
+      return fs.existsSync(dir) && fs.statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function buildAugmentedPathEnv(): string {
+  const currentPath = process.env.PATH || process.env.Path || '';
+  const parts = currentPath.split(path.delimiter).filter(Boolean);
+  const lowerExisting = new Set(parts.map((p) => p.toLowerCase()));
+  for (const extra of getExtraUserBinDirs()) {
+    if (!lowerExisting.has(extra.toLowerCase())) {
+      parts.push(extra);
+      lowerExisting.add(extra.toLowerCase());
+    }
+  }
+  return parts.join(path.delimiter);
+}
+
+export function findExecutableOnPath(binaryNames: string[]): string | null {
+  const pathEnv = buildAugmentedPathEnv();
   const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
   const pathExts =
     process.platform === 'win32'
@@ -76,10 +142,23 @@ function findExecutableOnPath(binaryNames: string[]): string | null {
 
   for (const name of binaryNames) {
     for (const dir of pathDirs) {
+      const hasKnownExt = pathExts.some((ext) =>
+        ext && name.toLowerCase().endsWith(ext.toLowerCase()),
+      );
+      if (hasKnownExt) {
+        const directCandidate = path.join(dir, name);
+        try {
+          if (fs.existsSync(directCandidate) && fs.statSync(directCandidate).isFile()) {
+            return directCandidate;
+          }
+        } catch {
+          // ignore
+        }
+      }
       for (const ext of pathExts) {
         const candidate = path.join(
           dir,
-          name.toLowerCase().endsWith(ext.toLowerCase()) ? name : `${name}${ext}`
+          name.toLowerCase().endsWith(ext.toLowerCase()) ? name : `${name}${ext}`,
         );
         try {
           if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
@@ -94,7 +173,7 @@ function findExecutableOnPath(binaryNames: string[]): string | null {
   return null;
 }
 
-function killProcessTree(pid: number | undefined): void {
+export function killProcessTree(pid: number | undefined): void {
   if (!pid) return;
   try {
     if (process.platform === 'win32') {
@@ -115,6 +194,7 @@ export class TerminalSessionManager {
   private readonly logger: HostLogger;
   private readonly sessions = new Map<string, ManagedSessionState>();
   private readonly resolvedPwshBinary: string;
+  private readonly defaultPwshTitle: string;
   private readonly resolvedCmdBinary: string;
   private readonly resolvedBashBinary: string | null;
 
@@ -124,6 +204,12 @@ export class TerminalSessionManager {
 
     this.resolvedPwshBinary =
       findExecutableOnPath(['pwsh.exe', 'powershell.exe']) || 'powershell.exe';
+    const isPwsh7 = path
+      .basename(this.resolvedPwshBinary)
+      .toLowerCase()
+      .startsWith('pwsh');
+    this.defaultPwshTitle = isPwsh7 ? 'PowerShell 7' : 'Windows PowerShell';
+
     this.resolvedCmdBinary =
       findExecutableOnPath(['cmd.exe']) || process.env.ComSpec || 'cmd.exe';
     this.resolvedBashBinary = findExecutableOnPath(['bash.exe']);
@@ -138,10 +224,13 @@ export class TerminalSessionManager {
       title: string;
       type: TerminalSession['type'];
     }> = [
-      { id: 'sess-pwsh', title: 'PowerShell', type: 'powershell' },
+      { id: 'sess-pwsh', title: this.defaultPwshTitle, type: 'powershell' },
       { id: 'sess-cmd', title: 'Command Prompt (CMD)', type: 'cmd' },
-      { id: 'sess-bash', title: 'Bash (WSL / Git Bash)', type: 'bash' },
     ];
+
+    if (this.resolvedBashBinary) {
+      defaults.push({ id: 'sess-bash', title: 'Bash (WSL / Git Bash)', type: 'bash' });
+    }
 
     for (const item of defaults) {
       this.sessions.set(item.id, {
@@ -155,6 +244,9 @@ export class TerminalSessionManager {
           isRunning: false,
         },
         proc: null,
+        readyPromise: null,
+        initBuffer: '',
+        isInitializing: false,
         pending: null,
         emitter: new EventEmitter(),
         seqCounter: 0,
@@ -187,9 +279,14 @@ export class TerminalSessionManager {
     }
 
     const id = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const normalizedTitle =
+      req.type === 'powershell' && (!req.title || req.title === 'PowerShell')
+        ? this.defaultPwshTitle
+        : req.title || `Session (${req.type})`;
+
     const session: TerminalSession = {
       id,
-      title: req.title || `Session (${req.type})`,
+      title: normalizedTitle,
       type: req.type,
       workingDir: dirResult.resolvedPath,
       history: [],
@@ -197,13 +294,40 @@ export class TerminalSessionManager {
       isRunning: false,
     };
 
-    this.sessions.set(id, {
+    const managed: ManagedSessionState = {
       session,
       proc: null,
+      activeAiChild: null,
+      providerSessionId: undefined,
+      aiCancelled: false,
+      readyPromise: null,
+      initBuffer: '',
+      isInitializing: false,
       pending: null,
       emitter: new EventEmitter(),
       seqCounter: 0,
-    });
+    };
+
+    if (isAiProviderSessionType(req.type)) {
+      const meta = KNOWN_AI_CLIS[req.type];
+      const foundBin = meta ? findExecutableOnPath(meta.binaryCandidates) : null;
+      if (meta && foundBin) {
+        const auth = inspectProviderAuth(req.type, foundBin);
+        this.pushToSessionBuffer(
+          managed,
+          'system',
+          `[${meta.toolName}] Bound to ${session.workingDir} (${foundBin} · ${auth.authDetail || auth.authStatus}). Enter a prompt or CLI flags.`,
+        );
+      } else if (meta) {
+        this.pushToSessionBuffer(
+          managed,
+          'error',
+          `[${meta.toolName}] Not installed on Windows PATH. Install with: ${meta.installCommand}`,
+        );
+      }
+    }
+
+    this.sessions.set(id, managed);
 
     this.logger.info('Created terminal session', {
       sessionId: id,
@@ -211,12 +335,15 @@ export class TerminalSessionManager {
       workingDir: session.workingDir,
     });
 
-    return { ...session };
+    return {
+      ...session,
+      buffer: [...session.buffer],
+    };
   }
 
   private ensureManagedSession(
     sessionId: string,
-    requestedWorkingDir?: string
+    requestedWorkingDir?: string,
   ): ManagedSessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
@@ -224,7 +351,15 @@ export class TerminalSessionManager {
       const initialDir = dirRes.ok
         ? dirRes.resolvedPath
         : this.config.defaultWorkspaceRoot;
-      const inferredType: TerminalSession['type'] = sessionId.includes('cmd')
+      const inferredType: TerminalSession['type'] = sessionId.includes('claude')
+        ? 'claude'
+        : sessionId.includes('gemini')
+        ? 'gemini'
+        : sessionId.includes('codex')
+        ? 'codex'
+        : sessionId.includes('antigravity')
+        ? 'antigravity'
+        : sessionId.includes('cmd')
         ? 'cmd'
         : sessionId.includes('bash')
         ? 'bash'
@@ -234,11 +369,19 @@ export class TerminalSessionManager {
         session: {
           id: sessionId,
           title:
-            inferredType === 'cmd'
+            inferredType === 'claude'
+              ? 'Claude Code'
+              : inferredType === 'gemini'
+              ? 'Gemini CLI'
+              : inferredType === 'codex'
+              ? 'OpenAI Codex'
+              : inferredType === 'antigravity'
+              ? 'Antigravity'
+              : inferredType === 'cmd'
               ? 'Command Prompt (CMD)'
               : inferredType === 'bash'
               ? 'Bash'
-              : 'PowerShell',
+              : this.defaultPwshTitle,
           type: inferredType,
           workingDir: initialDir,
           history: [],
@@ -246,6 +389,12 @@ export class TerminalSessionManager {
           isRunning: false,
         },
         proc: null,
+        activeAiChild: null,
+        providerSessionId: undefined,
+        aiCancelled: false,
+        readyPromise: null,
+        initBuffer: '',
+        isInitializing: false,
         pending: null,
         emitter: new EventEmitter(),
         seqCounter: 0,
@@ -255,33 +404,60 @@ export class TerminalSessionManager {
     return state;
   }
 
-  private ensureShellProcess(state: ManagedSessionState): ChildProcessWithoutNullStreams {
+  private async ensureShellProcess(
+    state: ManagedSessionState,
+  ): Promise<ChildProcessWithoutNullStreams> {
     if (state.proc && !state.proc.killed && state.proc.exitCode === null) {
+      if (state.readyPromise) {
+        await state.readyPromise;
+      }
       return state.proc;
     }
 
     const shellType = state.session.type;
     let binary = this.resolvedPwshBinary;
-    let args: string[] = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'];
+    let args: string[] = [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      '-',
+    ];
+    let needsPwshUtf8Init = true;
 
     if (shellType === 'cmd') {
       binary = this.resolvedCmdBinary;
-      args = ['/Q', '/K', 'prompt $P$G'];
+      args = ['/Q', '/K', 'chcp 65001 >nul & prompt $P$G'];
+      needsPwshUtf8Init = false;
     } else if (shellType === 'bash') {
       if (!this.resolvedBashBinary) {
         throw new Error(
-          'Bash executable is not installed or not found on Windows PATH.'
+          'Bash executable is not installed or not found on Windows PATH.',
         );
       }
       binary = this.resolvedBashBinary;
       args = ['--norc', '--noprofile'];
+      needsPwshUtf8Init = false;
     }
 
+    const augmentedPath = buildAugmentedPathEnv();
+    const spawnCwd =
+      fs.existsSync(state.session.workingDir) &&
+      fs.statSync(state.session.workingDir).isDirectory()
+        ? state.session.workingDir
+        : this.config.defaultWorkspaceRoot;
+    state.session.workingDir = spawnCwd;
+
     const child = spawn(binary, args, {
-      cwd: state.session.workingDir,
+      cwd: spawnCwd,
       env: {
         ...process.env,
+        PATH: augmentedPath,
+        Path: augmentedPath,
         TERM: 'xterm-256color',
+        PYTHONIOENCODING: 'utf-8',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -289,20 +465,67 @@ export class TerminalSessionManager {
 
     state.proc = child;
     state.session.activePid = child.pid;
+    state.initBuffer = '';
+    state.isInitializing = needsPwshUtf8Init;
+
+    let resolveReady: (() => void) | null = null;
+    if (needsPwshUtf8Init) {
+      state.readyPromise = new Promise<void>((res) => {
+        resolveReady = res;
+      });
+    } else {
+      state.readyPromise = null;
+    }
+
+    const readyFallbackTimer = needsPwshUtf8Init
+      ? setTimeout(() => {
+          if (state.isInitializing) {
+            state.isInitializing = false;
+            state.initBuffer = '';
+            resolveReady?.();
+          }
+        }, 3000)
+      : null;
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
 
     child.stdout.on('data', (chunk: string) => {
+      if (state.isInitializing) {
+        state.initBuffer += chunk;
+        const markerIdx = state.initBuffer.indexOf('__LT_SHELL_READY__');
+        if (markerIdx !== -1) {
+          if (readyFallbackTimer) clearTimeout(readyFallbackTimer);
+          const after = state.initBuffer
+            .slice(markerIdx + '__LT_SHELL_READY__'.length)
+            .replace(/^\r?\n/, '');
+          state.isInitializing = false;
+          state.initBuffer = '';
+          resolveReady?.();
+          if (after.length > 0) {
+            this.handleProcessOutput(state, after, 'output');
+          }
+        }
+        return;
+      }
       this.handleProcessOutput(state, chunk, 'output');
     });
 
     child.stderr.on('data', (chunk: string) => {
+      if (state.isInitializing) {
+        return;
+      }
       this.handleProcessOutput(state, chunk, 'error');
     });
 
     child.on('exit', (code) => {
+      if (readyFallbackTimer) clearTimeout(readyFallbackTimer);
+      if (state.isInitializing) {
+        state.isInitializing = false;
+        resolveReady?.();
+      }
       state.proc = null;
+      state.readyPromise = null;
       state.session.activePid = undefined;
       state.session.isRunning = false;
 
@@ -325,14 +548,21 @@ export class TerminalSessionManager {
       }
     });
 
+    if (needsPwshUtf8Init) {
+      child.stdin.write(
+        '[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [System.Text.UTF8Encoding]::new($false); $PSDefaultParameterValues[\'*:Encoding\'] = \'utf8\'; [Console]::Out.WriteLine("__LT_SHELL_READY__")\n',
+      );
+      await state.readyPromise;
+    }
+
     return child;
   }
 
   private appendOutputLine(
     state: ManagedSessionState,
     pending: PendingCommandExecution,
-    lineType: 'output' | 'error' | 'system',
-    content: string
+    lineType: TerminalLine['type'],
+    content: string,
   ): void {
     const clean = content.replace(/\r$/, '');
     const byteLen = Buffer.byteLength(clean, 'utf8');
@@ -354,7 +584,7 @@ export class TerminalSessionManager {
   private pushToSessionBuffer(
     state: ManagedSessionState,
     lineType: TerminalLine['type'],
-    content: string
+    content: string,
   ): TerminalLine {
     state.seqCounter += 1;
     const line: TerminalLine = {
@@ -375,7 +605,7 @@ export class TerminalSessionManager {
   private handleProcessOutput(
     state: ManagedSessionState,
     chunk: string,
-    stream: 'output' | 'error'
+    stream: 'output' | 'error',
   ): void {
     const pending = state.pending;
     if (!pending) {
@@ -419,7 +649,7 @@ export class TerminalSessionManager {
           state,
           pending,
           Number.isFinite(Number(exitCodeStr)) ? Number(exitCodeStr) : 0,
-          reportedCwd
+          reportedCwd,
         );
         return;
       }
@@ -427,7 +657,6 @@ export class TerminalSessionManager {
       this.appendOutputLine(state, pending, 'output', rawLine);
     }
 
-    // Also check if sentinel is sitting in stdoutRemainder without a trailing newline
     const remSentinelIdx = pending.stdoutRemainder.indexOf(sentinelPrefix);
     if (remSentinelIdx !== -1 && pending.stdoutRemainder.endsWith('__END__')) {
       const before = pending.stdoutRemainder.slice(0, remSentinelIdx).trimEnd();
@@ -447,7 +676,7 @@ export class TerminalSessionManager {
         state,
         pending,
         Number.isFinite(Number(exitCodeStr)) ? Number(exitCodeStr) : 0,
-        reportedCwd
+        reportedCwd,
       );
     }
   }
@@ -456,7 +685,7 @@ export class TerminalSessionManager {
     state: ManagedSessionState,
     pending: PendingCommandExecution,
     exitCode: number,
-    reportedCwd: string
+    reportedCwd: string,
   ): void {
     if (state.pending !== pending) {
       return;
@@ -474,7 +703,6 @@ export class TerminalSessionManager {
       if (isPathWithinAllowedRoots(reportedCwd, this.config.allowedRoots)) {
         state.session.workingDir = path.resolve(reportedCwd);
       } else {
-        // Revert unauthorized directory escape inside the persistent shell
         const revertDir = state.session.workingDir;
         if (state.proc && !state.proc.killed) {
           if (state.session.type === 'cmd') {
@@ -483,7 +711,7 @@ export class TerminalSessionManager {
             state.proc.stdin.write(`cd "${revertDir.replace(/\\/g, '/')}"\n`);
           } else {
             state.proc.stdin.write(
-              `Set-Location -LiteralPath '${revertDir.replace(/'/g, "''")}'\n`
+              `Set-Location -LiteralPath '${revertDir.replace(/'/g, "''")}'\n`,
             );
           }
         }
@@ -512,15 +740,16 @@ export class TerminalSessionManager {
     if (!firstToken || !KNOWN_AI_CLIS[firstToken]) {
       return null;
     }
-    const found = findExecutableOnPath([firstToken]);
+    const meta = KNOWN_AI_CLIS[firstToken];
+    const found = findExecutableOnPath(meta.binaryCandidates);
     if (found) {
       return null;
     }
-    return KNOWN_AI_CLIS[firstToken];
+    return meta;
   }
 
   public async executeCommand(
-    req: ExecuteCommandRequest
+    req: ExecuteCommandRequest,
   ): Promise<ExecuteCommandResponse & { workingDir?: string }> {
     const commandId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const state = this.ensureManagedSession(req.sessionId, req.workingDir);
@@ -543,7 +772,7 @@ export class TerminalSessionManager {
       };
     }
 
-    // 2. Validate requested working directory if explicitly supplied and not a virtual frontend path
+    // 2. Validate requested working directory if explicitly supplied
     if (req.workingDir) {
       const dirCheck = resolveAuthorizedWorkingDir(req.workingDir, this.config);
       if (!dirCheck.ok) {
@@ -559,14 +788,27 @@ export class TerminalSessionManager {
           lines: [{ type: 'error', content: dirCheck.error }],
         };
       }
-      // Only force-set the session working directory if the session has never run a command yet
-      if (state.session.history.length === 0 && !dirCheck.mappedFromVirtual) {
+      if (
+        (state.session.history.length === 0 || isAiProviderSessionType(state.session.type)) &&
+        !dirCheck.mappedFromVirtual
+      ) {
+        if (
+          isAiProviderSessionType(state.session.type) &&
+          state.session.workingDir.toLowerCase() !== dirCheck.resolvedPath.toLowerCase()
+        ) {
+          state.providerSessionId = undefined;
+        }
         state.session.workingDir = dirCheck.resolvedPath;
       }
     }
 
-    // 3. Check if an uninstalled AI CLI was invoked
-    const missingCli = this.detectMissingAiCli(req.command);
+    // 3. Check if an uninstalled AI CLI was invoked (or if this session is bound to an uninstalled AI CLI)
+    const missingCli = isAiProviderSessionType(state.session.type)
+      ? (() => {
+          const meta = KNOWN_AI_CLIS[state.session.type];
+          return meta && !findExecutableOnPath(meta.binaryCandidates) ? meta : null;
+        })()
+      : this.detectMissingAiCli(req.command);
     if (missingCli) {
       const msg = `'${missingCli.cliName}' is not installed on the Windows host PATH. Install with: ${missingCli.installCommand}`;
       this.pushToSessionBuffer(state, 'error', msg);
@@ -602,9 +844,80 @@ export class TerminalSessionManager {
     ].slice(0, 100);
     this.pushToSessionBuffer(state, 'input', trimmedCmd);
 
+    // 5. Dedicated AI CLI session execution (Claude Code, Gemini CLI, Codex CLI, Antigravity)
+    if (isAiProviderSessionType(state.session.type)) {
+      const providerId = state.session.type;
+      const meta = KNOWN_AI_CLIS[providerId];
+      const executablePath = findExecutableOnPath(meta.binaryCandidates)!;
+      const aiTimeoutMs = Math.max(this.config.commandTimeoutMs, 90_000);
+
+      state.session.isRunning = true;
+      state.aiCancelled = false;
+
+      return new Promise<ExecuteCommandResponse & { workingDir: string }>((resolve) => {
+        const noopTimer = setTimeout(() => {}, aiTimeoutMs + 5000);
+        const pending: PendingCommandExecution = {
+          commandId,
+          command: trimmedCmd,
+          lines: [],
+          stdoutRemainder: '',
+          stderrRemainder: '',
+          totalBytes: 0,
+          truncated: false,
+          timeoutHandle: noopTimer,
+          resolve,
+        };
+        state.pending = pending;
+
+        void executeAiProviderTurn({
+          providerId,
+          executablePath,
+          rawInput: trimmedCmd,
+          workingDir: state.session.workingDir,
+          providerSessionId: state.providerSessionId,
+          envOverrides: req.envOverrides,
+          augmentedPath: buildAugmentedPathEnv(),
+          timeoutMs: aiTimeoutMs,
+          onLine: (type, content) => {
+            if (state.pending === pending) {
+              this.appendOutputLine(state, pending, type, content);
+            }
+          },
+          onSpawn: (aiChild) => {
+            state.activeAiChild = aiChild;
+            state.session.activePid = aiChild.pid;
+          },
+          isCancelled: () => Boolean(state.aiCancelled),
+        }).then((turnRes) => {
+          clearTimeout(noopTimer);
+          if (state.pending !== pending) {
+            return;
+          }
+          state.pending = null;
+          state.activeAiChild = null;
+          state.session.activePid = undefined;
+          state.session.isRunning = false;
+          state.providerSessionId = turnRes.nextProviderSessionId;
+
+          state.emitter.emit('commandComplete', {
+            commandId,
+            exitCode: turnRes.exitCode,
+            workingDir: state.session.workingDir,
+          });
+
+          resolve({
+            commandId,
+            lines: pending.lines,
+            exitCode: turnRes.exitCode,
+            workingDir: state.session.workingDir,
+          });
+        });
+      });
+    }
+
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = this.ensureShellProcess(state);
+      child = await this.ensureShellProcess(state);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.pushToSessionBuffer(state, 'error', message);
@@ -633,6 +946,7 @@ export class TerminalSessionManager {
           state.session.isRunning = false;
           killProcessTree(child.pid);
           state.proc = null;
+          state.readyPromise = null;
           pendingRef.resolve({
             commandId,
             lines: pendingRef.lines,
@@ -655,44 +969,52 @@ export class TerminalSessionManager {
       };
       state.pending = pending;
 
-      // Apply any per-request environment variable overrides
       const envEntries = Object.entries(req.envOverrides || {}).filter(([k]) =>
-        /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(k),
       );
 
       if (state.session.type === 'cmd') {
         const envCommands = envEntries
           .map(([k, v]) => `set "${k}=${String(v).replace(/"/g, '')}"`)
           .join('\r\n');
-        const payload = [
-          ...(envCommands ? [envCommands] : []),
-          trimmedCmd,
-          `echo __LT_DONE_${commandId}__:%ERRORLEVEL%:%CD%`,
-        ].join('\r\n') + '\r\n';
+        const payload =
+          [
+            ...(envCommands ? [envCommands] : []),
+            trimmedCmd,
+            `echo __LT_DONE_${commandId}__:%ERRORLEVEL%:%CD%`,
+          ].join('\r\n') + '\r\n';
         child.stdin.write(payload);
       } else if (state.session.type === 'bash') {
         const envCommands = envEntries
           .map(([k, v]) => `export ${k}='${String(v).replace(/'/g, "'\\''")}'`)
           .join('\n');
-        const payload = [
-          ...(envCommands ? [envCommands] : []),
-          trimmedCmd,
-          `__lt_ec=$?; printf "__LT_DONE_${commandId}__:%d:%s\\n" "$__lt_ec" "$(pwd -W 2>/dev/null || pwd)"`,
-        ].join('\n') + '\n';
+        const payload =
+          [
+            ...(envCommands ? [envCommands] : []),
+            trimmedCmd,
+            `__lt_ec=$?; printf "__LT_DONE_${commandId}__:%d:%s\\n" "$__lt_ec" "$(pwd -W 2>/dev/null || pwd)"`,
+          ].join('\n') + '\n';
         child.stdin.write(payload);
       } else {
-        // Default: PowerShell
-        const envCommands = envEntries
+        // Persistent Windows PowerShell / PowerShell 7:
+        // Base64 dot-sourced ScriptBlock preserves caller scope ($vars, Set-Location, functions),
+        // streams output live through Out-Host, surfaces parse/terminating errors cleanly, and never hangs on syntax errors.
+        const envSetup = envEntries
           .map(([k, v]) => `$env:${k} = '${String(v).replace(/'/g, "''")}'`)
           .join('\n');
-        const sentinelLine = `$__lt_ok = $?; $__lt_ec = if (-not $__lt_ok) { if ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 1 } } elseif ($global:LASTEXITCODE) { $global:LASTEXITCODE } else { 0 }; [Console]::Out.WriteLine("__LT_DONE_${commandId}__:$($__lt_ec):$((Get-Location).Path)")`;
-        const payload = [
-          '$global:LASTEXITCODE = 0',
-          ...(envCommands ? [envCommands] : []),
-          trimmedCmd,
-          sentinelLine,
-        ].join('\n') + '\n';
-        child.stdin.write(payload);
+        const fullScript = envSetup ? `${envSetup}\n${trimmedCmd}` : trimmedCmd;
+        const b64 = Buffer.from(fullScript, 'utf8').toString('base64');
+
+        const singleLinePayload =
+          `$global:LASTEXITCODE = 0; $__lt_failed = $false; $Error.Clear(); ` +
+          `try { $__lt_src = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${b64}')); ` +
+          `$__lt_sb = [ScriptBlock]::Create($__lt_src); . $__lt_sb | Out-Host; ` +
+          `if ($Error.Count -gt 0 -and -not $global:LASTEXITCODE) { $__lt_failed = $true } } ` +
+          `catch { [Console]::Error.WriteLine(($_ | Out-String).TrimEnd()); $__lt_failed = $true }; ` +
+          `$__lt_ec = if ($global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) { $global:LASTEXITCODE } elseif ($__lt_failed) { 1 } else { 0 }; ` +
+          `[Console]::Out.WriteLine("__LT_DONE_${commandId}__:$($__lt_ec):$((Get-Location).Path)")\n`;
+
+        child.stdin.write(singleLinePayload);
       }
     });
   }
@@ -707,17 +1029,23 @@ export class TerminalSessionManager {
       return;
     }
 
-    // SIGINT or SIGTERM: interrupt running command and kill child process tree
-    const sigMsg = `^C\n[SIGINT] Process interrupted by client signal (${req.signal}).`;
+    state.aiCancelled = true;
+    const sigMsg = `^C\n[${req.signal}] Process interrupted by client signal.`;
     if (state.pending) {
       const pending = state.pending;
       state.pending = null;
       clearTimeout(pending.timeoutHandle);
       this.appendOutputLine(state, pending, 'error', sigMsg);
       state.session.isRunning = false;
+      if (state.activeAiChild) {
+        killProcessTree(state.activeAiChild.pid);
+        state.activeAiChild = null;
+        state.session.activePid = undefined;
+      }
       if (state.proc) {
         killProcessTree(state.proc.pid);
         state.proc = null;
+        state.readyPromise = null;
         state.session.activePid = undefined;
       }
       pending.resolve({
@@ -726,12 +1054,19 @@ export class TerminalSessionManager {
         exitCode: 130,
         workingDir: state.session.workingDir,
       });
-    } else if (state.proc) {
-      killProcessTree(state.proc.pid);
-      state.proc = null;
+    } else if (state.activeAiChild || state.proc) {
+      if (state.activeAiChild) {
+        killProcessTree(state.activeAiChild.pid);
+        state.activeAiChild = null;
+      }
+      if (state.proc) {
+        killProcessTree(state.proc.pid);
+        state.proc = null;
+        state.readyPromise = null;
+      }
       state.session.activePid = undefined;
       state.session.isRunning = false;
-      this.pushToSessionBuffer(state, 'system', sigMsg);
+      this.pushToSessionBuffer(state, 'error', sigMsg);
     }
 
     this.logger.info('Sent signal to terminal session', {
@@ -744,6 +1079,7 @@ export class TerminalSessionManager {
     const state = this.sessions.get(sessionId);
     if (!state) return;
 
+    state.aiCancelled = true;
     if (state.pending) {
       clearTimeout(state.pending.timeoutHandle);
       state.pending.resolve({
@@ -755,9 +1091,15 @@ export class TerminalSessionManager {
       state.pending = null;
     }
 
+    if (state.activeAiChild) {
+      killProcessTree(state.activeAiChild.pid);
+      state.activeAiChild = null;
+    }
+
     if (state.proc) {
       killProcessTree(state.proc.pid);
       state.proc = null;
+      state.readyPromise = null;
     }
 
     state.emitter.removeAllListeners();
@@ -770,7 +1112,7 @@ export class TerminalSessionManager {
 
   public subscribeSession(
     sessionId: string,
-    onLine: (line: TerminalLine) => void
+    onLine: (line: TerminalLine) => void,
   ): () => void {
     const state = this.ensureManagedSession(sessionId);
     state.emitter.on('line', onLine);

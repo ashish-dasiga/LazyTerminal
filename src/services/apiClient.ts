@@ -2,7 +2,7 @@
  * Lazy Terminal — HTTP/WebSocket API client for the Windows PC companion.
  *
  * Handles request timeouts, retries for transient failures, auth header
- * injection, and structured error responses.  All methods throw
+ * injection, and structured error responses. All methods throw
  * `ApiError` on failure so callers can show meaningful UI states.
  *
  * @module apiClient
@@ -30,7 +30,8 @@ export class ApiError extends Error {
 export class HostUnreachableError extends ApiError {
   constructor(detail?: string) {
     super(
-      detail || 'Windows PC host is unreachable. Check that the companion app is running and both devices are on the same network.',
+      detail ||
+        'Windows PC host is unreachable. Check that the companion app is running and both devices are on the same network.',
       0,
       'HOST_UNREACHABLE',
       true,
@@ -43,13 +44,40 @@ export class HostUnreachableError extends ApiError {
 // Session token management (in-memory only — never persisted to disk)
 // ---------------------------------------------------------------------------
 
-let sessionToken: string | null = null;
+const SESSION_STORAGE_KEY = 'lazy_terminal_session_token';
+
+function readStoredSessionToken(): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      return window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage access errors in restricted WebViews
+  }
+  return null;
+}
+
+let sessionToken: string | null = readStoredSessionToken();
 
 export function setSessionToken(token: string | null): void {
   sessionToken = token;
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      if (token) {
+        window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+      } else {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    }
+  } catch {
+    // Ignore storage access errors
+  }
 }
 
 export function getSessionToken(): string | null {
+  if (!sessionToken) {
+    sessionToken = readStoredSessionToken();
+  }
   return sessionToken;
 }
 
@@ -68,13 +96,6 @@ interface RequestOptions {
   skipAuth?: boolean;
 }
 
-/**
- * Make an HTTP request to the PC companion host.
- *
- * @param path  API path, e.g. "/api/v1/pty/sessions"
- * @param opts  Request options
- * @returns     Parsed JSON response body
- */
 export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const config = getAppConfig();
   const url = `${config.hostBaseUrl}${path}`;
@@ -84,7 +105,7 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Accept': 'application/json',
+    Accept: 'application/json',
   };
 
   if (!opts.skipAuth && sessionToken) {
@@ -114,18 +135,42 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '');
         let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        let errorCode = `HTTP_${response.status}`;
+
         try {
           const parsed = JSON.parse(errorBody);
-          if (parsed.errorMessage) errorMessage = parsed.errorMessage;
-          else if (parsed.message) errorMessage = parsed.message;
-          else if (parsed.error?.message) errorMessage = parsed.error.message;
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.errorMessage === 'string' && parsed.errorMessage) {
+              errorMessage = parsed.errorMessage;
+            } else if (typeof parsed.message === 'string' && parsed.message) {
+              errorMessage = parsed.message;
+            } else if (parsed.error && typeof parsed.error === 'object') {
+              if (typeof parsed.error.message === 'string' && parsed.error.message) {
+                errorMessage = parsed.error.message;
+              }
+              if (typeof parsed.error.code === 'string' && parsed.error.code) {
+                errorCode = parsed.error.code;
+              }
+            } else if (typeof parsed.error === 'string' && parsed.error) {
+              errorMessage = parsed.error;
+              if (/^[A-Z0-9_]+$/.test(parsed.error)) {
+                errorCode = parsed.error;
+              }
+            }
+          }
         } catch {
-          if (errorBody) errorMessage = errorBody;
+          if (
+            errorBody.toLowerCase().includes('<!doctype') ||
+            errorBody.toLowerCase().includes('<html')
+          ) {
+            errorMessage = `Unable to connect to Windows PC Companion at ${config.hostBaseUrl}. Ensure Lazy Terminal Companion is running on your PC and the Host URL is set to your PC's IP and port.`;
+          } else if (errorBody.trim().length > 0 && errorBody.length < 300) {
+            errorMessage = errorBody.trim();
+          }
         }
-        throw new ApiError(errorMessage, response.status, `HTTP_${response.status}`);
+        throw new ApiError(errorMessage, response.status, errorCode);
       }
 
-      // Some endpoints return 204 No Content
       if (response.status === 204) {
         return undefined as unknown as T;
       }
@@ -134,31 +179,30 @@ export async function apiRequest<T>(path: string, opts: RequestOptions = {}): Pr
     } catch (err: any) {
       lastError = err;
 
-      // Don't retry non-transient errors
       if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
         throw err;
       }
 
-      // Network/timeout errors → possibly transient
       if (err.name === 'AbortError') {
         lastError = new ApiError(
-          `Request to ${path} timed out after ${timeoutMs}ms`,
+          `Request to ${url} timed out after ${timeoutMs}ms. Please ensure your PC and phone are on the same Wi-Fi and the Lazy Terminal Host Companion is running.`,
           0,
           'TIMEOUT',
           true,
         );
       }
 
-      // TypeError from fetch = network failure (host unreachable, CORS, etc.)
       if (err instanceof TypeError) {
         lastError = new HostUnreachableError(err.message);
       }
 
       if (config.debugLogging) {
-        console.warn(`[apiClient] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${method} ${path}:`, err.message);
+        console.warn(
+          `[apiClient] Attempt ${attempt + 1}/${maxRetries + 1} failed for ${method} ${path}:`,
+          err.message,
+        );
       }
 
-      // Wait before retry (exponential backoff, short)
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
       }
@@ -177,14 +221,6 @@ export interface WsConnection {
   close: () => void;
 }
 
-/**
- * Open a WebSocket connection to the PC companion for streaming.
- *
- * @param path  WebSocket path, e.g. "/ws/pty/sess-123"
- * @param onMessage  Callback for incoming messages
- * @param onClose    Callback when connection closes
- * @returns A handle to close the connection
- */
 export function openWs(
   path: string,
   onMessage: (data: unknown) => void,

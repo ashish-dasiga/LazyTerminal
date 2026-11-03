@@ -24,6 +24,7 @@ export function ProjectsScreen({ onSwitchToTerminal }: ProjectsScreenProps) {
     projects,
     activeProjectId,
     setActiveProjectId,
+    setIsWorkspacePickerOpen,
     scanPcRepositories,
     isScanningPc,
   } = useRelay();
@@ -61,25 +62,36 @@ export function ProjectsScreen({ onSwitchToTerminal }: ProjectsScreenProps) {
           </p>
         </div>
 
-        {/* Scan PC Button */}
-        <button
-          onClick={scanPcRepositories}
-          disabled={isScanningPc}
-          className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 border border-[#2b303b] bg-[#1c1f26] hover:bg-[#232731] text-zinc-200 transition-colors cursor-pointer"
-          title="Scan Windows drives for Git repositories and workspaces"
-        >
-          {isScanningPc ? (
-            <>
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Scanning PC...
-            </>
-          ) : (
-            <>
-              <Radar className="w-3.5 h-3.5" />
-              Scan PC
-            </>
-          )}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setIsWorkspacePickerOpen(true)}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 border border-[#2b303b] bg-[#1c1f26] hover:bg-[#232731] text-zinc-200 transition-colors cursor-pointer"
+            title="Select any folder on Windows PC"
+          >
+            <Folder className="w-3.5 h-3.5 text-blue-400" />
+            Open Folder
+          </button>
+
+          {/* Scan PC Button */}
+          <button
+            onClick={scanPcRepositories}
+            disabled={isScanningPc}
+            className="px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 border border-[#2b303b] bg-[#1c1f26] hover:bg-[#232731] text-zinc-200 transition-colors cursor-pointer"
+            title="Scan Windows drives for Git repositories and workspaces"
+          >
+            {isScanningPc ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Scanning PC...
+              </>
+            ) : (
+              <>
+                <Radar className="w-3.5 h-3.5" />
+                Scan PC
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Filter input */}
@@ -179,11 +191,11 @@ export function ProjectsScreen({ onSwitchToTerminal }: ProjectsScreenProps) {
             <div className="flex items-center gap-2">
               <HardDrive className="w-4 h-4 text-zinc-400" />
               <h3 className="text-xs font-semibold text-white">
-                Directory Explorer (Cached)
+                Directory Explorer
               </h3>
             </div>
             <span className="text-[11px] text-zinc-500 font-mono">
-              {selectedProjectForExplorer.files.length} items cached in SQLite
+              {selectedProjectForExplorer.files.length} items on host
             </span>
           </div>
 

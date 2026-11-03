@@ -13,8 +13,12 @@ import {
   MobileNavSection,
 } from '../types/relay';
 import { executeCommandOnDaemon } from '../services/mockDaemon';
-import { getBackendAdapter, WindowsHostConnectionClient } from '../services';
-import { GitStatusResponse } from '../services/contracts';
+import { getBackendAdapter, getSessionToken, setSessionToken, ApiError } from '../services';
+import {
+  GitStatusResponse,
+  WorkspaceBrowseResponse,
+  WorkspaceInfo,
+} from '../services/contracts';
 import {
   enqueueIntent,
   seedOrListIntents,
@@ -30,14 +34,110 @@ import {
 
 export const DEFAULT_USER: UserAccount = {
   id: 'usr_dev_7701',
-  username: 'alex.chen',
-  email: 'alex.chen@workplace.internal',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80',
-  accountTier: 'Pro Developer',
+  username: 'local.developer',
+  email: 'local@windows-host.lan',
+  avatarUrl: '',
+  accountTier: 'Personal',
   isLoggedIn: true,
-  tokenExpiresAt: '2026-10-15 23:59 UTC',
+  tokenExpiresAt: 'Session-scoped',
 };
 
+const DEMO_SEED_INTENT_IDS = new Set(['intent-101', 'intent-102', 'intent-103']);
+
+const REAL_PLACEHOLDER_PROJECT: Project = {
+  id: 'host-workspace',
+  name: 'Workspace',
+  path: '',
+  isGitRepo: false,
+  exists: true,
+  accessible: true,
+  branch: 'local',
+  isDirty: false,
+  dirtyCount: 0,
+  ahead: 0,
+  behind: 0,
+  lastCommit: {
+    hash: '—',
+    message: 'Select or connect to a Windows PC folder',
+    author: '',
+    time: '',
+  },
+  pinned: true,
+  files: [],
+};
+
+const REAL_INITIAL_SESSIONS: TerminalSession[] = [
+  {
+    id: 'sess-pwsh',
+    title: 'PowerShell',
+    type: 'powershell',
+    workingDir: '',
+    history: [],
+    isRunning: false,
+    buffer: [],
+  },
+];
+
+const REAL_INITIAL_CLI_TOOLS: AiCliTool[] = [
+  {
+    id: 'claude',
+    name: 'Claude Code',
+    cliName: 'claude',
+    description: 'Anthropic agentic CLI for codebase navigation, editing, and tool execution on Windows PC.',
+    vendor: 'Anthropic PBC',
+    status: 'unavailable',
+    version: 'Not checked',
+    installCommand: 'npm install -g @anthropic-ai/claude-code',
+    installScope: 'Windows Host PATH / %USERPROFILE%\\.local\\bin',
+    runCommand: 'claude',
+    permissionsRequired: ['Native Shell Execution', 'File System Read/Write', 'Child Process Spawning'],
+    capabilities: ['Multi-turn sessions', 'Codebase reasoning', 'File edits'],
+  },
+  {
+    id: 'gemini',
+    name: 'Gemini CLI',
+    cliName: 'gemini',
+    description: 'Google Gemini workspace reasoning CLI running directly on your Windows PC.',
+    vendor: 'Google LLC',
+    status: 'unavailable',
+    version: 'Not checked',
+    installCommand: 'npm install -g @google/gemini-cli',
+    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
+    runCommand: 'gemini',
+    permissionsRequired: ['Native Shell Execution', 'File System Read/Write'],
+    capabilities: ['Multi-turn sessions', 'Code reasoning', 'Repo search'],
+  },
+  {
+    id: 'codex',
+    name: 'OpenAI Codex',
+    cliName: 'codex',
+    description: 'OpenAI Codex terminal coding agent running on your Windows PC.',
+    vendor: 'OpenAI Inc.',
+    status: 'unavailable',
+    version: 'Not checked',
+    installCommand: 'npm install -g @openai/codex',
+    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
+    runCommand: 'codex',
+    permissionsRequired: ['Native Shell Execution', 'File System Read/Write'],
+    capabilities: ['Non-interactive exec', 'Session resume', 'Code edits'],
+  },
+  {
+    id: 'antigravity',
+    name: 'Antigravity',
+    cliName: 'agy',
+    description: 'Google Antigravity CLI on Windows PC.',
+    vendor: 'Google LLC',
+    status: 'unavailable',
+    version: 'Not checked',
+    installCommand: 'agy --version',
+    installScope: 'Windows Host (%LOCALAPPDATA%\\agy\\bin)',
+    runCommand: 'agy',
+    permissionsRequired: ['Workspace Access', 'Agent Prompt Execution'],
+    capabilities: ['Print mode (-p)', 'JSON streaming', 'Continue session (-c)'],
+  },
+];
+
+// Mock-only fixtures retained strictly for explicitVITE_ADAPTER_MODE=mock unit tests
 const INITIAL_PROJECTS: Project[] = [
   {
     id: 'hyper-relay',
@@ -57,332 +157,27 @@ const INITIAL_PROJECTS: Project[] = [
     pinned: true,
     files: [
       {
-        name: 'src',
-        path: 'src',
-        isDir: true,
-        modified: '10/12/2026 09:10',
-        children: [
-          {
-            name: 'relay_daemon.rs',
-            path: 'src/relay_daemon.rs',
-            isDir: false,
-            size: '18.1 KB',
-            modified: '10/12/2026 09:12',
-            gitStatus: 'M',
-            content: `// Windows 11 Native Relay Daemon\nuse tokio::net::TcpListener;\nuse ed25519_dalek::{PublicKey, Signature};\n\n#[tokio::main]\npub async fn main() -> Result<(), Box<dyn std::error::Error>> {\n    println!("Starting Relay Daemon on port 9871...");\n    let listener = TcpListener::bind("0.0.0.0:9871").await?;\n    println!("Listening for verified mobile pairing tokens...");\n    loop {\n        let (socket, _) = listener.accept().await?;\n        tokio::spawn(async move {\n            handle_client(socket).await;\n        });\n    }\n}`,
-          },
-          {
-            name: 'wal_ledger.rs',
-            path: 'src/wal_ledger.rs',
-            isDir: false,
-            size: '7.4 KB',
-            modified: '10/12/2026 08:40',
-            gitStatus: 'clean',
-            content: `// SQLite WAL Reconciler\nuse rusqlite::{Connection, Result};\n\npub fn sync_offline_intents(conn: &Connection) -> Result<usize> {\n    let mut stmt = conn.prepare("SELECT id, cmd, seq FROM intents WHERE status = 'queued'")?;\n    // verify causal sequence...\n    Ok(0)\n}`,
-          },
-        ],
-      },
-      {
-        name: 'config',
-        path: 'config',
-        isDir: true,
-        modified: '10/12/2026 08:44',
-        children: [
-          {
-            name: 'tunnel.yaml',
-            path: 'config/tunnel.yaml',
-            isDir: false,
-            size: '1.2 KB',
-            modified: '10/12/2026 08:30',
-            gitStatus: 'U',
-            content: `version: 2\ntunnel:\n  id: tun-784-relay-direct\n  key_exchange: ed25519-chacha20poly1305\n  heartbeat_ms: 1200\n  local_forward: 9871\n  cloud_fallback: optional`,
-          },
-        ],
-      },
-      {
-        name: 'Cargo.toml',
-        path: 'Cargo.toml',
-        isDir: false,
-        size: '2.4 KB',
-        modified: '10/12/2026 09:10',
-        gitStatus: 'M',
-        content: `[package]\nname = "hyper-relay"\nversion = "1.4.0"\nedition = "2021"\n\n[dependencies]\ntokio = { version = "1.36", features = ["full"] }\nrusqlite = "0.31"\ned25519-dalek = "2.1"\nserde = { version = "1.0", features = ["derive"] }`,
-      },
-      {
         name: 'README.md',
         path: 'README.md',
         isDir: false,
         size: '4.8 KB',
         modified: '10/11/2026 14:02',
         gitStatus: 'clean',
-        content: `# Hyper Relay Windows Host\n\nHigh-performance remote development bridge for Windows 11 PC.\nConnect from Android phone via random 6-character connection key.`,
-      },
-      {
-        name: 'notes.txt',
-        path: 'notes.txt',
-        isDir: false,
-        size: '0.9 KB',
-        modified: '10/12/2026 07:15',
-        gitStatus: 'clean',
-        content: `TODO list:\n- Verify TLS 1.3 socket reconnect\n- Test offline intent batching\n- Review Claude Code AST inspect tool`,
+        content: '# Hyper Relay Mock Fixture\n',
       },
     ],
-  },
-  {
-    id: 'ai-agents',
-    name: 'claude-fleet',
-    path: 'C:\\Dev\\ai-agents\\claude-fleet',
-    branch: 'feat/tool-streaming',
-    isDirty: false,
-    dirtyCount: 0,
-    ahead: 3,
-    behind: 0,
-    lastCommit: {
-      hash: 'a9c210d',
-      message: 'perf: stream tool outputs directly to xterm vt100 sink',
-      author: 'alex.chen@relay-terminal.io',
-      time: '2h ago',
-    },
-    pinned: true,
-    files: [
-      {
-        name: 'agent.ts',
-        path: 'agent.ts',
-        isDir: false,
-        size: '12.4 KB',
-        modified: '10/12/2026 07:44',
-        gitStatus: 'clean',
-        content: `import { Agent } from '@anthropic-ai/claude-code';\n\nexport const fleet = new Agent({\n  name: 'Terminal-Fleet',\n  tools: ['bash', 'read_file', 'edit_file'],\n});`,
-      },
-      {
-        name: 'package.json',
-        path: 'package.json',
-        isDir: false,
-        size: '1.8 KB',
-        modified: '10/12/2026 07:20',
-        gitStatus: 'clean',
-        content: `{\n  "name": "claude-fleet",\n  "version": "1.0.0",\n  "type": "module"\n}`,
-      },
-    ],
-  },
-  {
-    id: 'enterprise-dashboard',
-    name: 'enterprise-dashboard',
-    path: 'C:\\Work\\enterprise-dashboard',
-    branch: 'release/v2.4',
-    isDirty: false,
-    dirtyCount: 0,
-    ahead: 0,
-    behind: 1,
-    lastCommit: {
-      hash: '7e11409',
-      message: 'chore: update production bundle chunking',
-      author: 'ci-bot',
-      time: 'Yesterday',
-    },
-    pinned: false,
-    files: [
-      {
-        name: 'next.config.mjs',
-        path: 'next.config.mjs',
-        isDir: false,
-        size: '3.1 KB',
-        modified: '10/11/2026 14:00',
-        gitStatus: 'clean',
-        content: `export default { reactStrictMode: true };`,
-      },
-    ],
-  },
-];
-
-const INITIAL_CLI_TOOLS: AiCliTool[] = [
-  {
-    id: 'claude',
-    name: 'Claude Code',
-    cliName: 'claude',
-    description: 'Anthropic agentic CLI for full-codebase navigation, editing, and tool execution on Windows PC.',
-    vendor: 'Anthropic PBC',
-    status: 'installed',
-    version: 'v1.0.8',
-    installCommand: 'npm install -g @anthropic-ai/claude-code',
-    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
-    runCommand: 'claude',
-    permissionsRequired: ['Native Shell Execution', 'File System Read/Write', 'Child Process Spawning'],
-    capabilities: ['Sub-agent delegation', 'Diff inspections', 'Curses interactive UI', 'AST refactoring'],
-  },
-  {
-    id: 'codex',
-    name: 'OpenAI Codex',
-    cliName: 'codex',
-    description: 'Code synthesizer and shell automation assistant powered by OpenAI models.',
-    vendor: 'OpenAI Inc.',
-    status: 'installed',
-    version: 'v0.9.4',
-    installCommand: 'npm install -g @openai/codex-cli',
-    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
-    runCommand: 'codex',
-    permissionsRequired: ['Native Shell Execution', 'File System Read'],
-    capabilities: ['Code synthesis', 'Refactoring suggestions', 'Inline bug detection'],
-  },
-  {
-    id: 'gemini',
-    name: 'Gemini CLI',
-    cliName: 'gemini',
-    description: 'Developer multi-turn workspace reasoning CLI with grounding in your local repo.',
-    vendor: 'Google LLC',
-    status: 'installed',
-    version: 'v2.5.0',
-    installCommand: 'npm install -g @google/gemini-cli',
-    installScope: 'Global Windows Node.js (%APPDATA%\\npm)',
-    runCommand: 'gemini',
-    permissionsRequired: ['Native Shell Execution', 'File System Read/Write'],
-    capabilities: ['Code reasoning', 'Semantic repo search', 'Multimodal context'],
-  },
-  {
-    id: 'antigravity',
-    name: 'Antigravity',
-    cliName: 'antigravity',
-    description: 'Autonomous agent runtime environment for automated workspace tasks.',
-    vendor: 'Google LLC',
-    status: 'installed',
-    version: 'v1.2.0',
-    installCommand: 'antigravity-daemon --host 127.0.0.1:9872',
-    installScope: 'Host Agent Daemon Service (Port 9872)',
-    runCommand: 'antigravity',
-    permissionsRequired: ['Agent Runtime Control', 'Autonomous Workspace Execution'],
-    capabilities: ['Autonomous task planning', 'Multi-file edits', 'Agent observation'],
-  },
-];
-
-const INITIAL_DEV_SERVERS: DevServer[] = [
-  {
-    id: 'srv-vite',
-    port: 5173,
-    url: 'http://localhost:5173',
-    name: 'Vite Frontend (hyper-relay client)',
-    framework: 'React + TypeScript + Vite 5.4',
-    status: 'active',
-    tunnelLatencyMs: 14,
-    route: '/',
-  },
-  {
-    id: 'srv-api',
-    port: 9871,
-    url: 'http://localhost:9871',
-    name: 'Relay Daemon Control API',
-    framework: 'Rust Tokio Async Daemon',
-    status: 'active',
-    tunnelLatencyMs: 9,
-    route: '/api/v1/health',
   },
 ];
 
 const INITIAL_SESSIONS: TerminalSession[] = [
   {
     id: 'sess-pwsh',
-    title: 'PowerShell 7.4',
+    title: 'PowerShell 7.4 (Mock)',
     type: 'powershell',
     workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['git status', 'cargo check', 'git diff'],
+    history: [],
     isRunning: false,
     buffer: [],
-  },
-  {
-    id: 'sess-cmd',
-    title: 'Command Prompt (CMD)',
-    type: 'cmd',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['dir', 'ver'],
-    isRunning: false,
-    buffer: [],
-  },
-  {
-    id: 'sess-bash',
-    title: 'Bash (WSL)',
-    type: 'bash',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['uname -a', 'ls -la'],
-    isRunning: false,
-    buffer: [],
-  },
-  {
-    id: 'sess-claude',
-    title: 'Claude Code',
-    type: 'claude',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['claude "inspect SQLite WAL checkpoint code"'],
-    isRunning: false,
-    buffer: [
-      {
-        id: 'cl-init-1',
-        type: 'ai_thought',
-        content: `\x1b[35m[Claude Code v1.0.8]\x1b[0m Attached to persistent session. Reading workspace context...`,
-        timestamp: '09:08:40',
-      },
-      {
-        id: 'cl-init-2',
-        type: 'output',
-        content: `\x1b[32mâœ” Project indexed\x1b[0m: 7 files parsed. Ready for developer commands.`,
-        timestamp: '09:08:42',
-      },
-    ],
-  },
-  {
-    id: 'sess-codex',
-    title: 'Codex CLI',
-    type: 'codex',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['codex "generate tests"'],
-    isRunning: false,
-    buffer: [],
-  },
-  {
-    id: 'sess-gemini',
-    title: 'Gemini CLI',
-    type: 'gemini',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['gemini "explain wal_ledger.rs"'],
-    isRunning: false,
-    buffer: [
-      {
-        id: 'gemini-init-1',
-        type: 'ai_thought',
-        content: `\x1b[34m[Gemini CLI v2.5.0]\x1b[0m Ready. Authenticated with Google Cloud Project.\nWorkspace indexed. Multi-turn reasoning available.`,
-        timestamp: '14:00:10',
-      },
-    ],
-  },
-  {
-    id: 'sess-antigravity',
-    title: 'Antigravity',
-    type: 'antigravity',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['antigravity status'],
-    isRunning: false,
-    buffer: [
-      {
-        id: 'ag-init-1',
-        type: 'output',
-        content: `\x1b[32m[Antigravity Agent Runtime v1.2.0]\x1b[0m Connected to Windows daemon bridge.\nAutonomous planner idle. Listening for tasks.`,
-        timestamp: '14:00:15',
-      },
-    ],
-  },
-  {
-    id: 'sess-build',
-    title: 'Dev Server Watcher',
-    type: 'build',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    history: ['npm run dev'],
-    isRunning: true,
-    buffer: [
-      {
-        id: 'b-init-1',
-        type: 'output',
-        content: `\x1b[32m  VITE v5.4.8\x1b[0m  \x1b[90mready in \x1b[1m218 ms\x1b[0m\n\n  \x1b[32mâžœ\x1b[0m  \x1b[1mLocal:\x1b[0m   \x1b[36mhttp://localhost:5173/\x1b[0m\n  \x1b[32mâžœ\x1b[0m  \x1b[1mTunnel:\x1b[0m  \x1b[36mhttps://tun-784.relay.internal/\x1b[0m (Sub-15ms E2E Encrypted)\n  \x1b[90m[HMR] websocket connection established\x1b[0m`,
-        timestamp: '09:05:00',
-      },
-    ],
   },
 ];
 
@@ -390,7 +185,7 @@ const INITIAL_INTENTS: CommandIntent[] = [
   {
     id: 'intent-101',
     seq: 1,
-    command: 'git checkout -b feature/reconciliation-engine',
+    command: 'git status',
     workingDir: 'C:\\Projects\\hyper-relay',
     projectName: 'hyper-relay',
     timestamp: Date.now() - 1000 * 60 * 18,
@@ -399,31 +194,38 @@ const INITIAL_INTENTS: CommandIntent[] = [
     expectedBaseBranch: 'main',
     expectedHeadCommit: '3f7a8b1',
   },
-  {
-    id: 'intent-102',
-    seq: 2,
-    command: 'git add src/relay_daemon.rs config/tunnel.yaml',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    projectName: 'hyper-relay',
-    timestamp: Date.now() - 1000 * 60 * 14,
-    status: 'queued',
-    causalDependencyHash: 'sha256:4c1e7a0',
-    expectedBaseBranch: 'feature/reconciliation-engine',
-    expectedHeadCommit: '3f7a8b1',
-  },
-  {
-    id: 'intent-103',
-    seq: 3,
-    command: 'git commit -m "feat(wal): persist causal graph sequence for offline reconciliation"',
-    workingDir: 'C:\\Projects\\hyper-relay',
-    projectName: 'hyper-relay',
-    timestamp: Date.now() - 1000 * 60 * 8,
-    status: 'queued',
-    causalDependencyHash: 'sha256:0d9f4e2',
-    expectedBaseBranch: 'feature/reconciliation-engine',
-    expectedHeadCommit: '3f7a8b1',
-  },
 ];
+
+export function workspaceInfoToProject(
+  ws: WorkspaceInfo,
+  existingFiles: ProjectFile[] = [],
+): Project {
+  return {
+    id: ws.id,
+    name: ws.name,
+    path: ws.path,
+    isGitRepo: ws.isGitRepo,
+    exists: ws.exists,
+    accessible: ws.accessible,
+    branch: ws.isGitRepo ? ws.branch || 'HEAD' : 'local',
+    isDirty: (ws.dirtyFiles ?? 0) > 0,
+    dirtyCount: ws.dirtyFiles ?? 0,
+    ahead: 0,
+    behind: 0,
+    lastCommit: {
+      hash: ws.lastCommitHash || (ws.isGitRepo ? 'HEAD' : '—'),
+      message:
+        ws.lastCommitMsg ||
+        (ws.isGitRepo ? 'Git repository synced' : 'Local Windows folder (non-Git)'),
+      author: '',
+      time: ws.lastSyncedAt
+        ? new Date(ws.lastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : 'Live',
+    },
+    pinned: true,
+    files: existingFiles,
+  };
+}
 
 interface RelayContextType {
   // Dual frontend switcher
@@ -448,6 +250,8 @@ interface RelayContextType {
   setMobileNav: (nav: MobileNavSection) => void;
   isDrawerOpen: boolean;
   setIsDrawerOpen: (open: boolean) => void;
+  isWorkspacePickerOpen: boolean;
+  setIsWorkspacePickerOpen: (open: boolean) => void;
 
   // Device & Host PC State
   device: DeviceInfo;
@@ -455,16 +259,20 @@ interface RelayContextType {
   togglePcOnline: () => void;
   toggleBackendServer: () => void;
 
-  // Projects & Files
+  // Projects, Dynamic Windows Workspaces & Files
   projects: Project[];
   activeProjectId: string;
   setActiveProjectId: (id: string) => void;
+  selectWorkspacePath: (folderPath: string) => Promise<Project>;
+  browseHostFolders: (dirPath?: string) => Promise<WorkspaceBrowseResponse>;
+  pickNativeHostFolder: () => Promise<Project | null>;
   activeProject: Project;
   activeFile: ProjectFile | null;
   setActiveFile: (file: ProjectFile | null) => void;
-  saveFileContent: (path: string, newContent: string) => void;
-  createFile: (name: string, isTextOnly?: boolean) => void;
-  createFolder: (name: string) => void;
+  saveFileContent: (path: string, newContent: string) => Promise<void>;
+  createFile: (name: string, isTextOnly?: boolean, subDir?: string) => Promise<void>;
+  createFolder: (name: string, subDir?: string) => Promise<void>;
+  renameProjectFile: (oldPath: string, newName: string, subDir?: string) => Promise<void>;
   unsavedFiles: Record<string, string>;
   setUnsavedDraft: (path: string, draft: string, originalContent?: string) => void;
   clearUnsavedDraft: (path: string) => void;
@@ -475,7 +283,7 @@ interface RelayContextType {
   clearFileError: () => void;
   loadFileContent: (filePath: string) => Promise<string>;
   refreshFiles: (subDir?: string) => Promise<void>;
-  deleteProjectFile: (filePath: string) => Promise<void>;
+  deleteProjectFile: (filePath: string, subDir?: string) => Promise<void>;
   gitStatus: GitStatusResponse | null;
   refreshGitStatus: () => Promise<void>;
 
@@ -492,8 +300,10 @@ interface RelayContextType {
 
   // Tools & Preview
   cliTools: AiCliTool[];
+  refreshCliTools: () => Promise<void>;
   installCliTool: (id: string) => Promise<void>;
   devServers: DevServer[];
+  refreshDevServers: () => Promise<void>;
   isScanningPc: boolean;
   scanPcRepositories: () => Promise<void>;
 
@@ -521,7 +331,7 @@ const RelayContext = createContext<RelayContextType | null>(null);
 function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('view') === 'mobile' || params.get('source') === 'pwa') {
+    if (params.get('view') === 'mobile' || params.get('source') === 'pwa' || params.get('source') === 'apk') {
       return 'mobile';
     }
     if (params.get('view') === 'laptop') {
@@ -530,7 +340,7 @@ function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
     if (params.get('view') === 'install' || params.get('view') === 'portal') {
       return 'portal';
     }
-    if (window.innerWidth <= 640) {
+    if (window.location.protocol === 'file:') {
       return 'mobile';
     }
   }
@@ -538,6 +348,8 @@ function getInitialFrontend(): 'portal' | 'mobile' | 'laptop' {
 }
 
 export function RelayProvider({ children }: { children: ReactNode }) {
+  const isMockOnInit = getBackendAdapter().isMock;
+
   const [activeFrontend, setActiveFrontend] = useState<'portal' | 'mobile' | 'laptop'>(getInitialFrontend);
   const [currentUser, setCurrentUser] = useState<UserAccount>(DEFAULT_USER);
   const [connectionStep, setConnectionStep] = useState<MobileConnectionStep>('enter_key');
@@ -547,47 +359,72 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   // Mobile drawer & navigation
   const [mobileNav, setMobileNav] = useState<MobileNavSection>('terminal');
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isWorkspacePickerOpen, setIsWorkspacePickerOpen] = useState(false);
 
   // Host PC & backend
-  const [device, setDevice] = useState<DeviceInfo>({
-    isOnline: true,
-    deviceName: 'DESKTOP-WIN11-PRO',
-    os: 'Windows 11 Pro 23H2 (Build 22631.4169)',
-    ip: '192.168.1.142',
-    port: 9871,
-    daemonVersion: 'v1.4.0 (tokio-xterm-vt100)',
-    pingMs: 18,
-    pairedAt: 'October 12, 2026',
-    ed25519Fingerprint: 'SHA256:4b7f8c2e91a0...93d8',
-    pairingToken: '',
-    sqliteDbSizeKb: 142,
-    backendServerStatus: 'running',
-    tunnelStatus: 'idle',
-    totalIntentsProcessed: 28,
-    cpuUsagePercent: 4.2,
-    memoryUsageMb: 184,
-    activePortBindings: [5173, 9871, 3000],
-  });
+  const [device, setDevice] = useState<DeviceInfo>(() =>
+    isMockOnInit
+      ? {
+          isOnline: true,
+          deviceName: 'MOCK-HOST',
+          os: 'Windows (Mock)',
+          ip: '127.0.0.1',
+          port: 9871,
+          daemonVersion: 'mock',
+          pingMs: 1,
+          pairedAt: 'Mock Session',
+          ed25519Fingerprint: 'mock',
+          pairingToken: '',
+          sqliteDbSizeKb: 0,
+          backendServerStatus: 'running',
+          tunnelStatus: 'idle',
+          totalIntentsProcessed: 0,
+          cpuUsagePercent: 0,
+          memoryUsageMb: 0,
+          activePortBindings: [9871],
+        }
+      : {
+          isOnline: false,
+          deviceName: 'Windows PC Host',
+          os: 'Windows',
+          ip: '127.0.0.1',
+          port: 9871,
+          daemonVersion: 'v1.0.0',
+          pingMs: 0,
+          pairedAt: 'Not paired',
+          ed25519Fingerprint: '',
+          pairingToken: '',
+          sqliteDbSizeKb: 0,
+          backendServerStatus: 'stopped',
+          tunnelStatus: 'idle',
+          totalIntentsProcessed: 0,
+          cpuUsagePercent: 0,
+          memoryUsageMb: 0,
+          activePortBindings: [],
+        },
+  );
 
-  const [projects, setProjects] = useState<Project[]>(INITIAL_PROJECTS);
-  const [activeProjectId, setActiveProjectId] = useState<string>('hyper-relay');
+  const [projects, setProjects] = useState<Project[]>(() =>
+    isMockOnInit ? INITIAL_PROJECTS : [REAL_PLACEHOLDER_PROJECT],
+  );
+  const [activeProjectId, setActiveProjectIdState] = useState<string>(() =>
+    isMockOnInit ? 'hyper-relay' : REAL_PLACEHOLDER_PROJECT.id,
+  );
   const [activeFile, setActiveFile] = useState<ProjectFile | null>(null);
   const [unsavedFiles, setUnsavedFiles] = useState<Record<string, string>>({});
   const [fileModal, setFileModal] = useState<'none' | 'new_file' | 'new_folder' | 'open_with' | 'no_file_selected'>('none');
 
-  const [sessions, setSessions] = useState<TerminalSession[]>(INITIAL_SESSIONS);
+  const [sessions, setSessions] = useState<TerminalSession[]>(() =>
+    isMockOnInit ? INITIAL_SESSIONS : REAL_INITIAL_SESSIONS,
+  );
   const [activeSessionId, setActiveSessionId] = useState<string>('sess-pwsh');
 
-  const [cliTools, setCliTools] = useState<AiCliTool[]>(INITIAL_CLI_TOOLS);
-  const [devServers, setDevServers] = useState<DevServer[]>(INITIAL_DEV_SERVERS);
-  const [intentQueue, setIntentQueue] = useState<CommandIntent[]>(INITIAL_INTENTS);
-  const [history, setHistory] = useState<string[]>([
-    'git status',
-    'git diff',
-    'cargo test',
-    'claude "inspect SQLite WAL checkpoint code"',
-    'dir',
-  ]);
+  const [cliTools, setCliTools] = useState<AiCliTool[]>(REAL_INITIAL_CLI_TOOLS);
+  const [devServers, setDevServers] = useState<DevServer[]>([]);
+  const [intentQueue, setIntentQueue] = useState<CommandIntent[]>(() =>
+    isMockOnInit ? INITIAL_INTENTS : [],
+  );
+  const [history, setHistory] = useState<string[]>([]);
 
   const [isScanningPc, setIsScanningPc] = useState(false);
   const [reconciliationPromptOpen, setReconciliationPromptOpen] = useState(false);
@@ -599,15 +436,15 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     installCommand: string;
   } | null>(null);
 
-  // Ashritha Subsystem 4 & 5: Live Filesystem & Git State
+  // Live Filesystem & Git State
   const [fileLoading, setFileLoading] = useState<boolean>(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
   const fileHashesRef = useRef<Record<string, string>>({});
   const clearFileError = useCallback(() => setFileError(null), []);
 
-  const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0];
-  const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
+  const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0] || REAL_PLACEHOLDER_PROJECT;
+  const activeSession = sessions.find((s) => s.id === activeSessionId) || sessions[0] || REAL_INITIAL_SESSIONS[0];
 
   // Helper map for installed CLIs
   const installedCliMap = cliTools.reduce<Record<string, boolean>>((acc, tool) => {
@@ -615,12 +452,103 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     return acc;
   }, {});
 
-  // Sync initial pairing key from the local Windows PC companion on startup
+  const refreshCliTools = useCallback(async () => {
+    const adapter = getBackendAdapter();
+    if (adapter.isMock) return;
+    try {
+      const tools = await adapter.cli.listTools();
+      if (Array.isArray(tools) && tools.length > 0) {
+        setCliTools(tools);
+      }
+    } catch {
+      // Keep honest fallback status when unauthenticated or offline
+    }
+  }, []);
+
+  const refreshDevServers = useCallback(async () => {
+    const adapter = getBackendAdapter();
+    if (adapter.isMock) return;
+    try {
+      const servers = await adapter.preview.listDevServers();
+      if (Array.isArray(servers)) {
+        setDevServers(servers);
+      }
+    } catch {
+      setDevServers([]);
+    }
+  }, []);
+
+  // Hydrate workspaces, persistent terminal sessions, CLI tools, and dev servers once authenticated
+  const syncConnectedHostState = useCallback(async () => {
+    const adapter = getBackendAdapter();
+    if (adapter.isMock) return;
+
+    let resolvedWorkspacePath = '';
+    if (adapter.workspace) {
+      try {
+        const wsState = await adapter.workspace.getState();
+        const combined: WorkspaceInfo[] = [];
+        if (wsState.activeWorkspace) {
+          combined.push(wsState.activeWorkspace);
+          resolvedWorkspacePath = wsState.activeWorkspace.path;
+        }
+        for (const rw of wsState.recentWorkspaces || []) {
+          if (!combined.some((item) => item.path.toLowerCase() === rw.path.toLowerCase())) {
+            combined.push(rw);
+          }
+        }
+        if (combined.length > 0) {
+          setProjects((prev) => {
+            const existingByPath = new Map(prev.map((p) => [p.path.toLowerCase(), p.files]));
+            return combined.map((ws) =>
+              workspaceInfoToProject(ws, existingByPath.get(ws.path.toLowerCase()) || []),
+            );
+          });
+          if (wsState.activeWorkspace) {
+            setActiveProjectIdState(wsState.activeWorkspace.id);
+          } else {
+            setActiveProjectIdState(combined[0].id);
+          }
+        }
+      } catch (err) {
+        console.warn('[RelayContext] Failed to load workspace state from host:', err);
+      }
+    }
+
+    try {
+      const hostSessions = await adapter.terminal.listSessions();
+      if (hostSessions.length > 0) {
+        setSessions(hostSessions);
+        setActiveSessionId((prev) =>
+          hostSessions.some((s) => s.id === prev) ? prev : hostSessions[0].id,
+        );
+      } else {
+        const created = await adapter.terminal.createSession({
+          title: 'PowerShell',
+          type: 'powershell',
+          workingDir: resolvedWorkspacePath || undefined,
+        });
+        setSessions([created]);
+        setActiveSessionId(created.id);
+      }
+    } catch (err) {
+      console.warn('[RelayContext] Failed to initialize host terminal sessions:', err);
+    }
+
+    refreshCliTools().catch(() => {});
+    refreshDevServers().catch(() => {});
+  }, [refreshCliTools, refreshDevServers]);
+
+  // Sync initial pairing key & restore valid session token on startup
   useEffect(() => {
     let cancelled = false;
-    const syncHostKey = async () => {
+    const initHostConnection = async () => {
       const adapter = getBackendAdapter();
-      const conn = adapter.connection as any;
+      const conn = adapter.connection as {
+        fetchActiveHostKey?: () => Promise<{ pairingKey: string; expiresInSeconds: number }>;
+      };
+
+      // 1. Fetch active pairing key if viewing from PC companion / local portal
       if (conn && typeof conn.fetchActiveHostKey === 'function') {
         try {
           const keyEnvelope = await conn.fetchActiveHostKey();
@@ -634,7 +562,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             }));
           }
         } catch {
-          if (!cancelled) {
+          if (!cancelled && !adapter.isMock) {
             setDevice((prev) => ({
               ...prev,
               isOnline: false,
@@ -644,29 +572,63 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           }
         }
       }
+
+      // 2. If a session token exists in sessionStorage, verify it against the real host
+      if (!adapter.isMock && getSessionToken()) {
+        try {
+          const hostInfo = await adapter.connection.getHostDeviceInfo();
+          if (!cancelled) {
+            setDevice((prev) => ({
+              ...prev,
+              ...hostInfo,
+              isOnline: true,
+              backendServerStatus: 'running',
+              tunnelStatus: 'active',
+            }));
+            setConnectionStep('connected');
+            await syncConnectedHostState();
+          }
+        } catch (err) {
+          if (!cancelled) {
+            if (err instanceof ApiError && err.status === 401) {
+              setSessionToken(null);
+              setConnectionStep('enter_key');
+            } else {
+              setDevice((prev) => ({
+                ...prev,
+                isOnline: false,
+                backendServerStatus: 'stopped',
+                tunnelStatus: 'idle',
+              }));
+            }
+          }
+        }
+      }
     };
-    syncHostKey();
+    initHostConnection();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [syncConnectedHostState]);
 
   // Regenerate random connection key for Windows PC
   const regenerateConnectionKey = useCallback(() => {
     const adapter = getBackendAdapter();
-    const conn = adapter.connection as any;
+    const conn = adapter.connection as {
+      generateHostKey?: () => Promise<{ pairingKey: string }>;
+    };
     if (conn && typeof conn.generateHostKey === 'function') {
       conn
         .generateHostKey()
-        .then((res: any) => {
+        .then((res) => {
           if (res?.pairingKey) {
             setGeneratedConnectionKey(res.pairingKey);
             setDevice((prev) => ({ ...prev, pairingToken: res.pairingKey }));
           }
         })
-        .catch((err: any) => {
+        .catch((err: unknown) => {
           setConnectionError(
-            err instanceof Error ? err.message : 'Failed to regenerate key on Windows host.'
+            err instanceof Error ? err.message : 'Failed to regenerate key on Windows host.',
           );
         });
       return generatedConnectionKey;
@@ -682,7 +644,6 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   // Login handler
   const loginUser = useCallback(async (email: string, _pass: string) => {
-    await new Promise((r) => setTimeout(r, 600));
     setCurrentUser((prev) => ({
       ...prev,
       email: email || prev.email,
@@ -693,42 +654,65 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Connect with random key
-  const connectWithKey = useCallback(async (key: string) => {
-    setConnectionError(null);
-    setConnectionStep('connecting');
+  const connectWithKey = useCallback(
+    async (key: string) => {
+      setConnectionError(null);
+      setConnectionStep('connecting');
 
-    const adapter = getBackendAdapter();
-    try {
-      const res = await adapter.connection.connectToHost({ pairingKey: key });
-      if (res.success) {
-        setDevice((prev) => ({
-          ...prev,
-          ...res.device,
-          pairingToken: key,
-          isOnline: true,
-          backendServerStatus: 'running',
-          tunnelStatus: 'active',
-        }));
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        try {
+          const res = await adapter.connection.connectToHost({ pairingKey: key });
+          if (res.success) {
+            setDevice((prev) => ({
+              ...prev,
+              ...res.device,
+              pairingToken: generatedConnectionKey,
+              isOnline: true,
+              backendServerStatus: 'running',
+              tunnelStatus: 'active',
+            }));
+            setConnectionStep('connected');
+            setMobileNav('terminal');
+            await syncConnectedHostState();
+            return true;
+          }
+          setConnectionStep('enter_key');
+          setConnectionError(
+            res.errorMessage ||
+              `Incorrect token number "${key}". Please check the current 6-digit key displayed on your Windows PC.`,
+          );
+          return false;
+        } catch (err) {
+          setConnectionStep('enter_key');
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const cleanMsg =
+            rawMsg.toLowerCase().includes('<!doctype') ||
+            rawMsg.toLowerCase().includes('<html')
+              ? 'Unable to connect to Windows PC companion. Ensure Lazy Terminal companion is running on your PC and both devices are on the same Wi-Fi.'
+              : rawMsg;
+          setConnectionError(cleanMsg);
+          return false;
+        }
+      }
+
+      const normalizedInput = key.replace(/[\s-]/g, '').toLowerCase();
+      const normalizedTarget = generatedConnectionKey.replace(/[\s-]/g, '').toLowerCase();
+
+      if (normalizedInput === normalizedTarget) {
         setConnectionStep('connected');
         setMobileNav('terminal');
         return true;
+      } else {
+        setConnectionStep('enter_key');
+        setConnectionError(
+          `Incorrect pairing code "${key}". Please enter the 6-digit code shown on your Windows companion app.`,
+        );
+        return false;
       }
-      setConnectionStep('enter_key');
-      setConnectionError(
-        res.errorMessage ||
-          `Incorrect pairing code "${key}". Please check the current 6-digit key displayed on your Windows PC.`
-      );
-      return false;
-    } catch (err) {
-      setConnectionStep('enter_key');
-      setConnectionError(
-        err instanceof Error
-          ? err.message
-          : 'Windows PC companion is unreachable. Start the host companion and try again.'
-      );
-      return false;
-    }
-  }, []);
+    },
+    [generatedConnectionKey, syncConnectedHostState],
+  );
 
   // Disconnect mobile
   const disconnectMobile = useCallback(() => {
@@ -736,6 +720,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     if (!adapter.isMock) {
       adapter.connection.disconnectHost().catch(() => {});
     }
+    setSessionToken(null);
     setConnectionStep('enter_key');
     setConnectionError(null);
     setDevice((prev) => ({
@@ -744,18 +729,155 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
-  // Toggle PC Online / Offline
+  // Select any real Windows folder path as the active workspace
+  const selectWorkspacePath = useCallback(async (folderPath: string): Promise<Project> => {
+    const trimmed = folderPath.trim();
+    if (!trimmed) {
+      throw new Error('Please enter or select a Windows folder path.');
+    }
+
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock && adapter.workspace) {
+      const res = await adapter.workspace.selectWorkspace(trimmed);
+      const selectedProj = workspaceInfoToProject(res.workspace, []);
+      const combined: WorkspaceInfo[] = [res.workspace];
+      for (const rw of res.recentWorkspaces || []) {
+        if (!combined.some((w) => w.path.toLowerCase() === rw.path.toLowerCase())) {
+          combined.push(rw);
+        }
+      }
+
+      setProjects((prev) => {
+        const existingByPath = new Map(prev.map((p) => [p.path.toLowerCase(), p.files]));
+        return combined.map((ws) =>
+          workspaceInfoToProject(
+            ws,
+            ws.path.toLowerCase() === res.workspace.path.toLowerCase()
+              ? []
+              : existingByPath.get(ws.path.toLowerCase()) || [],
+          ),
+        );
+      });
+      setActiveProjectIdState(selectedProj.id);
+      setActiveFile(null);
+      setFileError(null);
+      setGitStatus(null);
+      return selectedProj;
+    }
+
+    const found = projects.find(
+      (p) => p.path.toLowerCase() === trimmed.toLowerCase() || p.id === trimmed,
+    );
+    if (found) {
+      setActiveProjectIdState(found.id);
+      setActiveFile(null);
+      return found;
+    }
+
+    const customProj: Project = {
+      id: `ws-${Date.now()}`,
+      name: trimmed.split(/[\\/]/).filter(Boolean).pop() || trimmed,
+      path: trimmed,
+      isGitRepo: false,
+      exists: true,
+      accessible: true,
+      branch: 'local',
+      isDirty: false,
+      dirtyCount: 0,
+      ahead: 0,
+      behind: 0,
+      lastCommit: { hash: '—', message: 'Local folder', author: '', time: 'Now' },
+      pinned: true,
+      files: [],
+    };
+    setProjects((prev) => [customProj, ...prev]);
+    setActiveProjectIdState(customProj.id);
+    setActiveFile(null);
+    return customProj;
+  }, [projects]);
+
+  const setActiveProjectId = useCallback(
+    (id: string) => {
+      const target = projects.find((p) => p.id === id);
+      const adapter = getBackendAdapter();
+      if (target && !adapter.isMock && adapter.workspace && device.isOnline && target.path) {
+        selectWorkspacePath(target.path).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : 'Selected workspace is inaccessible on host.';
+          setFileError(msg);
+          setProjects((prev) =>
+            prev.map((p) => (p.id === id ? { ...p, exists: false, accessible: false } : p)),
+          );
+        });
+        return;
+      }
+      setActiveProjectIdState(id);
+      setActiveFile(null);
+      setFileError(null);
+    },
+    [device.isOnline, projects, selectWorkspacePath],
+  );
+
+  const browseHostFolders = useCallback(async (dirPath?: string): Promise<WorkspaceBrowseResponse> => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock && adapter.workspace) {
+      return adapter.workspace.browse(dirPath);
+    }
+    return {
+      currentPath: dirPath || null,
+      parentPath: null,
+      drives: ['C:\\'],
+      entries: [],
+    };
+  }, []);
+
+  const pickNativeHostFolder = useCallback(async (): Promise<Project | null> => {
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock && adapter.workspace) {
+      const res = await adapter.workspace.pickNativeFolder(activeProject.path || undefined);
+      if (res.cancelled || !res.workspace) {
+        return null;
+      }
+      return selectWorkspacePath(res.workspace.path);
+    }
+    return null;
+  }, [activeProject.path, selectWorkspacePath]);
+
+  // Toggle PC Online / Offline (client-side offline queue mode toggle)
   const togglePcOnline = useCallback(() => {
+    const adapter = getBackendAdapter();
+    if (!device.isOnline && !adapter.isMock) {
+      adapter.connection
+        .getHostDeviceInfo()
+        .then((hostInfo) => {
+          setDevice((prev) => ({
+            ...prev,
+            ...hostInfo,
+            isOnline: true,
+            backendServerStatus: 'running',
+            tunnelStatus: 'active',
+          }));
+        })
+        .catch(() => {
+          setDevice((prev) => ({
+            ...prev,
+            isOnline: false,
+            pingMs: 0,
+            tunnelStatus: 'idle',
+          }));
+        });
+      return;
+    }
+
     setDevice((prev) => {
       const willBeOnline = !prev.isOnline;
       return {
         ...prev,
         isOnline: willBeOnline,
-        pingMs: willBeOnline ? 18 + Math.floor(Math.random() * 8) : 0,
+        pingMs: willBeOnline ? prev.pingMs || 4 : 0,
         tunnelStatus: willBeOnline ? 'active' : 'idle',
       };
     });
-  }, []);
+  }, [device.isOnline]);
 
   // Toggle Windows Backend Server
   const toggleBackendServer = useCallback(() => {
@@ -787,7 +909,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         })
         .catch((err) => {
           setConnectionError(
-            err instanceof Error ? err.message : 'Failed to toggle Windows host daemon.'
+            err instanceof Error ? err.message : 'Failed to toggle Windows host daemon.',
           );
         });
       return;
@@ -804,12 +926,24 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     });
   }, [device.backendServerStatus]);
 
-  // Load or seed persisted offline queue from IndexedDB on startup
+  // Load persisted offline queue from IndexedDB on startup (without fake demo seeds in real mode)
   useEffect(() => {
     let mounted = true;
-    seedOrListIntents(INITIAL_INTENTS)
-      .then((stored) => {
-        if (mounted && stored.length > 0) {
+    const isMock = getBackendAdapter().isMock;
+    seedOrListIntents(isMock ? INITIAL_INTENTS : [])
+      .then(async (stored) => {
+        if (!mounted) return;
+        if (!isMock) {
+          const realStored: CommandIntent[] = [];
+          for (const item of stored) {
+            if (DEMO_SEED_INTENT_IDS.has(item.id)) {
+              await deleteStoredIntent(item.id).catch(() => {});
+            } else {
+              realStored.push(item);
+            }
+          }
+          setIntentQueue(realStored);
+        } else if (stored.length > 0) {
           setIntentQueue(stored);
         }
       })
@@ -825,41 +959,140 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (device.isOnline) {
       markConnected();
-      detectDivergedIntents(
-        activeProject.branch,
-        activeProject.lastCommit.hash,
-        activeProject.name,
-      )
-        .then((updated) => {
-          if (mountedQueueHasChanges(updated)) {
-            setIntentQueue(updated);
-          }
-        })
-        .catch(() => {});
+      if (activeProject.path) {
+        detectDivergedIntents(
+          activeProject.branch,
+          activeProject.lastCommit.hash,
+          activeProject.name,
+        )
+          .then((updated) => {
+            if (updated.length > 0) {
+              const isMock = getBackendAdapter().isMock;
+              setIntentQueue(
+                isMock ? updated : updated.filter((i) => !DEMO_SEED_INTENT_IDS.has(i.id)),
+              );
+            }
+          })
+          .catch(() => {});
+      }
     } else {
       markDisconnected('Host offline');
     }
-    function mountedQueueHasChanges(updated: CommandIntent[]) {
-      return updated.length > 0;
-    }
-  }, [device.isOnline, activeProject.branch, activeProject.lastCommit.hash, activeProject.name]);
+  }, [device.isOnline, activeProject.branch, activeProject.lastCommit.hash, activeProject.name, activeProject.path]);
 
-  // Prompt reconciliation when connected and PC comes online with pending intents
+  // Prompt reconciliation when connected and PC comes online with genuinely queued intents
   useEffect(() => {
-    if (connectionStep === 'connected' && device.isOnline && intentQueue.filter((i) => i.status === 'queued').length > 0) {
+    if (
+      connectionStep === 'connected' &&
+      device.isOnline &&
+      intentQueue.filter((i) => i.status === 'queued').length > 0
+    ) {
       setReconciliationPromptOpen(true);
     }
   }, [connectionStep, device.isOnline, intentQueue]);
 
+  // Query live Git status from host
+  const refreshGitStatus = useCallback(async () => {
+    if (!device.isOnline || !activeProject.path) return;
+    const adapter = getBackendAdapter();
+    if (!adapter.isMock && !getSessionToken()) return;
+
+    try {
+      const status = await adapter.git.getStatus(activeProject.path);
+      setGitStatus(status);
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== activeProjectId) return p;
+          return {
+            ...p,
+            isGitRepo: status.isGitRepo !== false,
+            branch: status.isGitRepo === false ? 'local' : status.branch,
+            isDirty: status.isDirty,
+            dirtyCount: status.dirtyFilesCount,
+            ahead: status.ahead,
+            behind: status.behind,
+            lastCommit: status.lastCommit,
+          };
+        }),
+      );
+    } catch {
+      // Leave previous status intact on transient errors
+    }
+  }, [activeProject.path, activeProjectId, device.isOnline]);
+
+  // Refresh directory files from host (including empty folders!)
+  const refreshFiles = useCallback(
+    async (subDir?: string) => {
+      if (!device.isOnline || !activeProject.path) return;
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !getSessionToken()) return;
+
+      setFileLoading(true);
+      setFileError(null);
+      try {
+        const rawItems = await adapter.fileSystem.listFiles({
+          projectPath: activeProject.path,
+          subDirectory: subDir,
+        });
+        const items: ProjectFile[] = Array.isArray(rawItems)
+          ? rawItems
+          : ((rawItems as { files?: ProjectFile[] })?.files || []);
+
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.id !== activeProjectId) return p;
+            if (!subDir) {
+              const existingChildren = new Map(
+                p.files.filter((f) => f.isDir && f.children).map((f) => [f.name, f.children]),
+              );
+              const merged = items.map((item) =>
+                item.isDir && existingChildren.has(item.name)
+                  ? { ...item, children: existingChildren.get(item.name) }
+                  : item,
+              );
+              return { ...p, files: merged };
+            }
+            const segments = subDir.split('/').filter(Boolean);
+            const attachChildren = (list: ProjectFile[], depth: number): ProjectFile[] =>
+              list.map((f) => {
+                if (f.isDir && f.name === segments[depth]) {
+                  if (depth === segments.length - 1) {
+                    return { ...f, children: items };
+                  }
+                  return { ...f, children: attachChildren(f.children || [], depth + 1) };
+                }
+                return f;
+              });
+            return { ...p, files: attachChildren(p.files, 0) };
+          }),
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to list directory from host';
+        setFileError(msg);
+      } finally {
+        setFileLoading(false);
+      }
+    },
+    [activeProject.path, activeProjectId, device.isOnline],
+  );
+
   // Save file content with host persistence and conflict checks
   const saveFileContent = useCallback(
     async (filePath: string, newContent: string) => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        const msg = 'Cannot save file while Windows PC host is disconnected.';
+        setFileError(msg);
+        throw new Error(msg);
+      }
+
       if (device.isOnline) {
         setFileLoading(true);
         setFileError(null);
         try {
-          const writeRes = await getBackendAdapter().fileSystem.writeFile({
+          const writeRes = await adapter.fileSystem.writeFile({
             filePath,
+            projectPath: activeProject.path,
             content: newContent,
             expectedVersionHash: fileHashesRef.current[filePath],
           });
@@ -880,8 +1113,8 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         prev.map((p) => {
           if (p.id !== activeProjectId) return p;
 
-          const updateRecursive = (files: ProjectFile[]): ProjectFile[] => {
-            return files.map((f) => {
+          const updateRecursive = (files: ProjectFile[]): ProjectFile[] =>
+            files.map((f) => {
               if (f.path === filePath) {
                 return { ...f, content: newContent, gitStatus: 'M', modified: 'Just now' };
               }
@@ -890,18 +1123,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
               }
               return f;
             });
-          };
 
           return {
             ...p,
-            isDirty: true,
-            dirtyCount: p.dirtyCount + 1,
             files: updateRecursive(p.files),
           };
-        })
+        }),
       );
 
-      // Clear unsaved draft so unsaved dot is removed on successful save
       setUnsavedFiles((prev) => {
         if (!prev[filePath]) return prev;
         const copy = { ...prev };
@@ -910,25 +1139,33 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       });
 
       setActiveFile((prev) => (prev ? { ...prev, content: newContent, gitStatus: 'M' } : null));
+      refreshGitStatus().catch(() => {});
     },
-    [activeProjectId, device.isOnline]
+    [activeProject.path, activeProjectId, device.isOnline, refreshGitStatus],
   );
 
   // Load raw file content from host
   const loadFileContent = useCallback(
     async (filePath: string): Promise<string> => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        const msg = 'Cannot read file while Windows PC host is disconnected.';
+        setFileError(msg);
+        throw new Error(msg);
+      }
+
       if (device.isOnline) {
         setFileLoading(true);
         setFileError(null);
         try {
-          const res = (await getBackendAdapter().fileSystem.readFile({ filePath })) as {
-            content: string;
-            sizeBytes: number;
-            hash?: string;
-          };
+          const res = await adapter.fileSystem.readFile({
+            filePath,
+            projectPath: activeProject.path,
+          });
           if (res.hash) {
             fileHashesRef.current[filePath] = res.hash;
           }
+          const sizeBytes = res.sizeBytes ?? res.size ?? Buffer.byteLength?.(res.content || '') ?? 0;
           setProjects((prev) =>
             prev.map((p) => {
               if (p.id !== activeProjectId) return p;
@@ -938,17 +1175,20 @@ export function RelayProvider({ children }: { children: ReactNode }) {
                     return {
                       ...f,
                       content: res.content,
-                      size: `${(res.sizeBytes / 1024).toFixed(1)} KB`,
+                      size:
+                        sizeBytes < 1024
+                          ? `${sizeBytes} B`
+                          : `${(sizeBytes / 1024).toFixed(1)} KB`,
                     };
                   }
                   if (f.children) return { ...f, children: updateRecursive(f.children) };
                   return f;
                 });
               return { ...p, files: updateRecursive(p.files) };
-            })
+            }),
           );
           setActiveFile((prev) =>
-            prev && prev.path === filePath ? { ...prev, content: res.content } : prev
+            prev && prev.path === filePath ? { ...prev, content: res.content } : prev,
           );
           return res.content;
         } catch (err: unknown) {
@@ -961,72 +1201,203 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       }
       return '';
     },
-    [activeProjectId, device.isOnline]
+    [activeProject.path, activeProjectId, device.isOnline],
   );
 
-  // Refresh directory files from host
-  const refreshFiles = useCallback(
-    async (subDir?: string) => {
+  // Create new file in active project (or Explorer subdirectory)
+  const createFile = useCallback(
+    async (name: string, isTextOnly?: boolean, subDir?: string) => {
+      const cleanName = isTextOnly && !name.includes('.') ? `${name}.txt` : name.trim();
+      if (!cleanName) return;
+
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        setFileError('Cannot create file while Windows PC host is disconnected.');
+        return;
+      }
+
+      let createdFile: ProjectFile | null = null;
+      const targetDir = subDir
+        ? `${activeProject.path.replace(/[\\/]+$/, '')}\\${subDir.replace(/\//g, '\\')}`
+        : activeProject.path;
+
       if (device.isOnline) {
         setFileLoading(true);
         setFileError(null);
         try {
-          const rawItems = await getBackendAdapter().fileSystem.listFiles({
+          createdFile = await adapter.fileSystem.createFile({
+            directoryPath: targetDir,
             projectPath: activeProject.path,
-            subDirectory: subDir,
+            fileName: cleanName,
+            isTextOnly,
           });
-          const items: ProjectFile[] = Array.isArray(rawItems) ? rawItems : ((rawItems as any)?.files || []);
-          if (items && items.length > 0) {
-            setProjects((prev) =>
-              prev.map((p) => {
-                if (p.id !== activeProjectId) return p;
-                if (!subDir) {
-                  const existingChildren = new Map(
-                    p.files.filter((f) => f.isDir && f.children).map((f) => [f.name, f.children])
-                  );
-                  const merged = items.map((item) =>
-                    item.isDir && existingChildren.has(item.name)
-                      ? { ...item, children: existingChildren.get(item.name) }
-                      : item
-                  );
-                  return { ...p, files: merged };
-                }
-                const segments = subDir.split('/').filter(Boolean);
-                const attachChildren = (list: ProjectFile[], depth: number): ProjectFile[] =>
-                  list.map((f) => {
-                    if (f.isDir && f.name === segments[depth]) {
-                      if (depth === segments.length - 1) {
-                        return { ...f, children: items };
-                      }
-                      return { ...f, children: attachChildren(f.children || [], depth + 1) };
-                    }
-                    return f;
-                  });
-                return { ...p, files: attachChildren(p.files, 0) };
-              })
-            );
-          }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : 'Failed to list directory from host';
+          const msg = err instanceof Error ? err.message : 'Create file failed on host';
           setFileError(msg);
+          setFileLoading(false);
+          return;
         } finally {
           setFileLoading(false);
         }
       }
+
+      const relPath = createdFile?.path || (subDir ? `${subDir}/${cleanName}` : cleanName);
+      const newFile: ProjectFile = {
+        name: createdFile?.name || cleanName,
+        path: relPath,
+        isDir: false,
+        size: createdFile?.size || '0 B',
+        modified: createdFile?.modified || 'Just now',
+        gitStatus: 'U',
+        content: createdFile?.content ?? '',
+      };
+
+      if (device.isOnline && !adapter.isMock) {
+        await refreshFiles(subDir);
+        refreshGitStatus().catch(() => {});
+      } else {
+        setProjects((prev) =>
+          prev.map((p) => (p.id === activeProjectId ? { ...p, files: [...p.files, newFile] } : p)),
+        );
+      }
+
+      setActiveFile(newFile);
     },
-    [activeProject.path, activeProjectId, device.isOnline]
+    [activeProject.path, activeProjectId, device.isOnline, refreshFiles, refreshGitStatus],
   );
 
-  // Delete file or folder on host
-  const deleteProjectFile = useCallback(
-    async (filePath: string) => {
+  // Create new folder in active project (or Explorer subdirectory)
+  const createFolder = useCallback(
+    async (folderName: string, subDir?: string) => {
+      const cleanName = folderName.trim();
+      if (!cleanName) return;
+
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        setFileError('Cannot create folder while Windows PC host is disconnected.');
+        return;
+      }
+
+      const targetDir = subDir
+        ? `${activeProject.path.replace(/[\\/]+$/, '')}\\${subDir.replace(/\//g, '\\')}`
+        : activeProject.path;
+
       if (device.isOnline) {
         setFileLoading(true);
         setFileError(null);
         try {
-          await getBackendAdapter().fileSystem.deleteFile({ filePath });
+          await adapter.fileSystem.createFile({
+            directoryPath: targetDir,
+            projectPath: activeProject.path,
+            fileName: cleanName,
+            isFolder: true,
+          });
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : 'Failed to delete file on host';
+          const msg = err instanceof Error ? err.message : 'Create folder failed on host';
+          setFileError(msg);
+          setFileLoading(false);
+          return;
+        } finally {
+          setFileLoading(false);
+        }
+      }
+
+      if (device.isOnline && !adapter.isMock) {
+        await refreshFiles(subDir);
+      } else {
+        const newFolder: ProjectFile = {
+          name: cleanName,
+          path: subDir ? `${subDir}/${cleanName}` : cleanName,
+          isDir: true,
+          modified: 'Just now',
+          children: [],
+        };
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === activeProjectId ? { ...p, files: [...p.files, newFolder] } : p,
+          ),
+        );
+      }
+    },
+    [activeProject.path, activeProjectId, device.isOnline, refreshFiles],
+  );
+
+  // Rename file or folder on host
+  const renameProjectFile = useCallback(
+    async (oldPath: string, newName: string, subDir?: string) => {
+      const cleanNewName = newName.trim();
+      if (!cleanNewName) return;
+
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        const msg = 'Cannot rename item while Windows PC host is disconnected.';
+        setFileError(msg);
+        throw new Error(msg);
+      }
+
+      let renamedNewPath = cleanNewName;
+      if (device.isOnline && adapter.fileSystem.renameFile) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          const res = await adapter.fileSystem.renameFile({
+            projectPath: activeProject.path,
+            oldPath,
+            newName: cleanNewName,
+          });
+          renamedNewPath = res.newPath;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Failed to rename on host';
+          setFileError(msg);
+          setFileLoading(false);
+          throw err;
+        } finally {
+          setFileLoading(false);
+        }
+      }
+
+      setUnsavedFiles((prev) => {
+        if (prev[oldPath] === undefined) return prev;
+        const copy = { ...prev, [renamedNewPath]: prev[oldPath] };
+        delete copy[oldPath];
+        return copy;
+      });
+
+      setActiveFile((prev) =>
+        prev && prev.path === oldPath
+          ? { ...prev, name: cleanNewName, path: renamedNewPath }
+          : prev,
+      );
+
+      if (device.isOnline && !adapter.isMock) {
+        await refreshFiles(subDir);
+        refreshGitStatus().catch(() => {});
+      }
+    },
+    [activeProject.path, device.isOnline, refreshFiles, refreshGitStatus],
+  );
+
+  // Delete file or folder on host
+  const deleteProjectFile = useCallback(
+    async (filePath: string, subDir?: string) => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && !device.isOnline) {
+        const msg = 'Cannot delete item while Windows PC host is disconnected.';
+        setFileError(msg);
+        throw new Error(msg);
+      }
+
+      if (device.isOnline) {
+        setFileLoading(true);
+        setFileError(null);
+        try {
+          await adapter.fileSystem.deleteFile({
+            filePath,
+            projectPath: activeProject.path,
+            recursive: true,
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Failed to delete item on host';
           setFileError(msg);
           throw err;
         } finally {
@@ -1034,52 +1405,30 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id !== activeProjectId) return p;
-          const removeRecursive = (files: ProjectFile[]): ProjectFile[] =>
-            files
-              .filter((f) => f.path !== filePath && f.name !== filePath)
-              .map((f) => (f.children ? { ...f, children: removeRecursive(f.children) } : f));
-          return { ...p, files: removeRecursive(p.files) };
-        })
-      );
-
       setActiveFile((prev) => (prev?.path === filePath ? null : prev));
-    },
-    [activeProjectId, device.isOnline]
-  );
 
-  // Query live Git status from host
-  const refreshGitStatus = useCallback(async () => {
-    if (device.isOnline) {
-      try {
-        const status = await getBackendAdapter().git.getStatus(activeProject.path);
-        setGitStatus(status);
+      if (device.isOnline && !adapter.isMock) {
+        await refreshFiles(subDir);
+        refreshGitStatus().catch(() => {});
+      } else {
         setProjects((prev) =>
           prev.map((p) => {
             if (p.id !== activeProjectId) return p;
-            return {
-              ...p,
-              branch: status.branch,
-              isDirty: status.isDirty,
-              dirtyCount: status.dirtyFilesCount,
-              ahead: status.ahead,
-              behind: status.behind,
-              lastCommit: status.lastCommit,
-            };
-          })
+            const removeRecursive = (files: ProjectFile[]): ProjectFile[] =>
+              files
+                .filter((f) => f.path !== filePath && f.name !== filePath)
+                .map((f) => (f.children ? { ...f, children: removeRecursive(f.children) } : f));
+            return { ...p, files: removeRecursive(p.files) };
+          }),
         );
-      } catch {
-        // Leave previous status intact if host is offline or not git repo
       }
-    }
-  }, [activeProject.path, activeProjectId, device.isOnline]);
+    },
+    [activeProject.path, activeProjectId, device.isOnline, refreshFiles, refreshGitStatus],
+  );
 
   // Track draft content per file
   const setUnsavedDraft = useCallback((filePath: string, draft: string, originalContent?: string) => {
     setUnsavedFiles((prev) => {
-      // If draft matches saved original content, remove from unsavedFiles
       if (originalContent !== undefined && draft === originalContent) {
         if (!prev[filePath]) return prev;
         const copy = { ...prev };
@@ -1099,111 +1448,13 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Create new file in active project
-  const createFile = useCallback(
-    async (name: string, isTextOnly?: boolean) => {
-      const cleanName = isTextOnly && !name.includes('.') ? `${name}.txt` : name;
-      let createdContent = isTextOnly ? '# New text document\n' : '// New source file\n';
-
-      if (device.isOnline) {
-        setFileLoading(true);
-        setFileError(null);
-        try {
-          const res = await getBackendAdapter().fileSystem.createFile({
-            directoryPath: activeProject.path,
-            fileName: cleanName,
-            isTextOnly,
-          });
-          if (res.content) createdContent = res.content;
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : 'Create file failed on host';
-          setFileError(msg);
-        } finally {
-          setFileLoading(false);
-        }
-      }
-
-      const newFile: ProjectFile = {
-        name: cleanName,
-        path: cleanName,
-        isDir: false,
-        size: '0 B',
-        modified: 'Just now',
-        gitStatus: 'U',
-        content: createdContent,
-      };
-
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id !== activeProjectId) return p;
-          return {
-            ...p,
-            isDirty: true,
-            dirtyCount: p.dirtyCount + 1,
-            files: [...p.files, newFile],
-          };
-        })
-      );
-
-      setActiveFile(newFile);
-    },
-    [activeProjectId, activeProject.path, device.isOnline]
-  );
-
-  // Sync live host filesystem and Git status on mount / project switch
+  // Sync live host filesystem and Git status on connection / workspace switch
   useEffect(() => {
-    if (device.isOnline) {
+    if (connectionStep === 'connected' && device.isOnline && activeProject.path) {
       refreshFiles().catch(() => {});
       refreshGitStatus().catch(() => {});
     }
-  }, [device.isOnline, activeProjectId, refreshFiles, refreshGitStatus]);
-
-  // Create new folder in active project
-  const createFolder = useCallback(
-    async (folderName: string) => {
-      const cleanName = folderName.trim();
-      if (!cleanName) return;
-
-      if (device.isOnline) {
-        setFileLoading(true);
-        setFileError(null);
-        try {
-          const fsService = getBackendAdapter().fileSystem as {
-            createFile: (req: { directoryPath: string; fileName: string; isFolder?: boolean }) => Promise<ProjectFile>;
-          };
-          await fsService.createFile({
-            directoryPath: activeProject.path,
-            fileName: cleanName,
-            isFolder: true,
-          });
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : 'Create folder failed on host';
-          setFileError(msg);
-        } finally {
-          setFileLoading(false);
-        }
-      }
-
-      const newFolder: ProjectFile = {
-        name: cleanName,
-        path: cleanName,
-        isDir: true,
-        modified: 'Just now',
-        children: [],
-      };
-
-      setProjects((prev) =>
-        prev.map((p) => {
-          if (p.id !== activeProjectId) return p;
-          return {
-            ...p,
-            files: [...p.files, newFolder],
-          };
-        })
-      );
-    },
-    [activeProjectId, activeProject.path, device.isOnline]
-  );
+  }, [connectionStep, device.isOnline, activeProjectId, activeProject.path, refreshFiles, refreshGitStatus]);
 
   // Execute terminal command
   const executeCommand = useCallback(
@@ -1213,21 +1464,18 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       const trimmedCmd = cmd.trim();
       const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
 
-      // Add to session history
       setHistory((prev) => {
         const filtered = prev.filter((h) => h !== trimmedCmd);
         return [trimmedCmd, ...filtered];
       });
 
-      // Special handling for 'cls' or 'clear'
       if (trimmedCmd.toLowerCase() === 'cls' || trimmedCmd.toLowerCase() === 'clear') {
         setSessions((prev) =>
-          prev.map((s) => (s.id === activeSessionId ? { ...s, buffer: [] } : s))
+          prev.map((s) => (s.id === activeSessionId ? { ...s, buffer: [] } : s)),
         );
         return;
       }
 
-      // Add user input line to active session
       const inputLine: TerminalLine = {
         id: `in-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         type: 'input',
@@ -1243,12 +1491,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
                 buffer: [...s.buffer, inputLine],
                 isRunning: true,
               }
-            : s
-        )
+            : s,
+        ),
       );
 
-      // --- HONEST OFFLINE STATE ---
-      // If PC is offline, never claim it executed. Buffer honest intent in SQLite queue!
+      // Honest offline buffering when PC is disconnected
       if (!device.isOnline) {
         const now = Date.now();
         const existingDup = intentQueue.find(
@@ -1258,17 +1505,16 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             e.status === 'queued' &&
             Math.abs(now - e.timestamp) < 5000,
         );
-        const nextSeq =
-          existingDup
-            ? existingDup.seq
-            : intentQueue.length > 0
-            ? Math.max(...intentQueue.map((i) => i.seq)) + 1
-            : 1;
+        const nextSeq = existingDup
+          ? existingDup.seq
+          : intentQueue.length > 0
+          ? Math.max(...intentQueue.map((i) => i.seq)) + 1
+          : 1;
         const newIntent: CommandIntent = existingDup ?? {
           id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
           seq: nextSeq,
           command: trimmedCmd,
-          workingDir: activeProject.path,
+          workingDir: activeSession.workingDir || activeProject.path,
           projectName: activeProject.name,
           timestamp: now,
           status: 'queued',
@@ -1279,7 +1525,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
         if (!existingDup) {
           enqueueIntent(newIntent).catch((err) =>
-            console.warn('[RelayContext] Failed to persist offline intent:', err)
+            console.warn('[RelayContext] Failed to persist offline intent:', err),
           );
           setIntentQueue((prev) => [...prev, newIntent]);
         }
@@ -1287,55 +1533,47 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         const bufferedLine: TerminalLine = {
           id: `buf-${Date.now()}`,
           type: 'intent_buffered',
-          content: `\x1b[33m[OFFLINE INTENT #${String(nextSeq).padStart(2, '0')} BUFFERED]\x1b[0m PC is currently disconnected. Stored in local phone queue. Will reconcile when Windows PC reconnects.`,
+          content: `\x1b[33m[OFFLINE INTENT #${String(nextSeq).padStart(2, '0')} BUFFERED]\x1b[0m PC is currently disconnected. Stored in local phone queue. Requires approval when Windows PC reconnects.`,
           timestamp,
           seq: nextSeq,
           intentId: newIntent.id,
         };
 
-        setTimeout(() => {
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === activeSessionId
-                ? {
-                    ...s,
-                    buffer: [...s.buffer, bufferedLine],
-                    isRunning: false,
-                  }
-                : s
-            )
-          );
-        }, 120);
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === activeSessionId
+              ? {
+                  ...s,
+                  buffer: [...s.buffer, bufferedLine],
+                  isRunning: false,
+                }
+              : s,
+          ),
+        );
         return;
       }
 
-      // If PC is online: execute on real Windows Host Companion via adapter (or mock fallback)
+      // Real Windows Host Companion execution
       const adapter = getBackendAdapter();
       if (!adapter.isMock) {
         try {
-          const hostResult = (await adapter.terminal.executeCommand({
+          const hostResult = await adapter.terminal.executeCommand({
             sessionId: activeSessionId,
             command: trimmedCmd,
             workingDir: activeSession.workingDir || activeProject.path,
-          })) as Awaited<ReturnType<typeof adapter.terminal.executeCommand>> & {
-            workingDir?: string;
-          };
+          });
 
           if (hostResult.interceptCliPrompt) {
             setInterceptedCli(hostResult.interceptCliPrompt);
           }
 
+          // Update ONLY this terminal session's workingDir (never mutate activeProject.path!)
           if (hostResult.workingDir) {
             const newDir = hostResult.workingDir;
             setSessions((prev) =>
               prev.map((s) =>
-                s.id === activeSessionId ? { ...s, workingDir: newDir } : s
-              )
-            );
-            setProjects((prev) =>
-              prev.map((p) =>
-                p.id === activeProjectId ? { ...p, path: newDir } : p
-              )
+                s.id === activeSessionId ? { ...s, workingDir: newDir } : s,
+              ),
             );
           }
 
@@ -1347,15 +1585,27 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           }));
 
           setSessions((prev) =>
-            prev.map((s) =>
-              s.id === activeSessionId
-                ? {
-                    ...s,
-                    buffer: [...s.buffer, ...outLines],
-                    isRunning: false,
-                  }
-                : s
-            )
+            prev.map((s) => {
+              if (s.id !== activeSessionId) return s;
+              // Deduplicate lines if live SSE already appended streamed lines for this command
+              const recentStreamed = new Set(
+                s.buffer
+                  .filter((b) => b.isStreaming)
+                  .map((b) => `${b.type}:${b.content}`),
+              );
+              const nonDupOutLines =
+                recentStreamed.size > 0
+                  ? outLines.filter((ol) => !recentStreamed.has(`${ol.type}:${ol.content}`))
+                  : outLines;
+              const cleanedBuffer = s.buffer.map((b) =>
+                b.isStreaming ? { ...b, isStreaming: false } : b,
+              );
+              return {
+                ...s,
+                buffer: [...cleanedBuffer, ...nonDupOutLines],
+                isRunning: false,
+              };
+            }),
           );
           return;
         } catch (err) {
@@ -1375,79 +1625,43 @@ export function RelayProvider({ children }: { children: ReactNode }) {
                     buffer: [...s.buffer, errorLine],
                     isRunning: false,
                   }
-                : s
-            )
+                : s,
+            ),
           );
           return;
         }
       }
 
+      // Mock fallback (only when VITE_ADAPTER_MODE=mock)
       const result = executeCommandOnDaemon(trimmedCmd, activeProject, installedCliMap);
-
       if (result.interceptCliPrompt) {
         setInterceptedCli(result.interceptCliPrompt);
       }
-
-      if (result.stateChanges) {
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.id === activeProjectId) {
-              return {
-                ...p,
-                ...(result.stateChanges?.branch ? { branch: result.stateChanges.branch } : {}),
-                ...(result.stateChanges?.isDirty !== undefined
-                  ? {
-                      isDirty: result.stateChanges.isDirty,
-                      dirtyCount: result.stateChanges.dirtyCount ?? p.dirtyCount,
-                    }
-                  : {}),
-                ...(result.stateChanges?.newCommit
-                  ? {
-                      lastCommit: result.stateChanges.newCommit,
-                      ahead: p.ahead + 1,
-                    }
-                  : {}),
-              };
-            }
-            return p;
-          })
-        );
-      }
-
       for (const line of result.lines) {
-        await new Promise((resolve) => setTimeout(resolve, line.delay || 60));
         const outLine: TerminalLine = {
           id: `out-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           type: line.type,
           content: line.content,
           timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
         };
-
         setSessions((prev) =>
           prev.map((s) =>
-            s.id === activeSessionId
-              ? {
-                  ...s,
-                  buffer: [...s.buffer, outLine],
-                }
-              : s
-          )
+            s.id === activeSessionId ? { ...s, buffer: [...s.buffer, outLine] } : s,
+          ),
         );
       }
-
       setSessions((prev) =>
-        prev.map((s) => (s.id === activeSessionId ? { ...s, isRunning: false } : s))
+        prev.map((s) => (s.id === activeSessionId ? { ...s, isRunning: false } : s)),
       );
     },
     [
-      activeProjectId,
-      activeSessionId,
-      activeSession.workingDir,
       activeProject,
+      activeSession.workingDir,
+      activeSessionId,
       device.isOnline,
       installedCliMap,
       intentQueue,
-    ]
+    ],
   );
 
   const dismissCliIntercept = () => setInterceptedCli(null);
@@ -1465,7 +1679,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       const now = new Date().toLocaleTimeString('en-US', { hour12: false });
       if (signal === 'CLEAR') {
         setSessions((prev) =>
-          prev.map((s) => (s.id === activeSessionId ? { ...s, buffer: [] } : s))
+          prev.map((s) => (s.id === activeSessionId ? { ...s, buffer: [] } : s)),
         );
         return;
       }
@@ -1474,134 +1688,258 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         const sigLine: TerminalLine = {
           id: `sig-${Date.now()}`,
           type: 'system',
-          content: `^C\n\x1b[31m[${signal}]\x1b[0m Process interrupted by mobile client signal.`,
+          content: `^C\n\x1b[31m[${signal}]\x1b[0m Interrupt signal sent to Windows host session.`,
           timestamp: now,
         };
         setSessions((prev) =>
           prev.map((s) =>
             s.id === activeSessionId
               ? { ...s, isRunning: false, buffer: [...s.buffer, sigLine] }
-              : s
-          )
+              : s,
+          ),
         );
       }
     },
-    [activeSessionId]
+    [activeSessionId],
   );
 
-  // Create session
-  const createSession = useCallback((title: string, type: TerminalSession['type']) => {
-    const adapter = getBackendAdapter();
-    if (!adapter.isMock) {
-      adapter.terminal
-        .createSession({ title, type, workingDir: activeProject.path })
-        .then((created) => {
-          setSessions((prev) => [...prev, created]);
-          setActiveSessionId(created.id);
-        })
-        .catch(() => {
-          const fallbackId = `sess-${Date.now()}`;
-          const newSession: TerminalSession = {
-            id: fallbackId,
+  // Create session on Windows PC host
+  const createSession = useCallback(
+    (title: string, type: TerminalSession['type']) => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        adapter.terminal
+          .createSession({
             title,
             type,
-            workingDir: activeProject.path,
-            history: [],
-            buffer: [],
-            isRunning: false,
-          };
-          setSessions((prev) => [...prev, newSession]);
-          setActiveSessionId(fallbackId);
-        });
+            workingDir: activeProject.path || undefined,
+          })
+          .then((created) => {
+            setSessions((prev) => {
+              const filtered = prev.filter((s) => s.id !== created.id);
+              return [...filtered, created];
+            });
+            setActiveSessionId(created.id);
+          })
+          .catch((err: unknown) => {
+            const msg =
+              err instanceof Error ? err.message : 'Failed to create session on Windows host.';
+            const errorLine: TerminalLine = {
+              id: `sess-err-${Date.now()}`,
+              type: 'error',
+              content: `[Session Launch Failed] ${msg}`,
+              timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+            };
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === activeSessionId ? { ...s, buffer: [...s.buffer, errorLine] } : s,
+              ),
+            );
+          });
+        return;
+      }
+
+      const newId = `sess-${Date.now()}`;
+      const newSession: TerminalSession = {
+        id: newId,
+        title,
+        type,
+        workingDir: activeProject.path,
+        history: [],
+        buffer: [],
+        isRunning: false,
+      };
+      setSessions((prev) => [...prev, newSession]);
+      setActiveSessionId(newId);
+    },
+    [activeProject.path, activeSessionId],
+  );
+
+  // Close session
+  const closeSession = useCallback(
+    (id: string) => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        adapter.terminal
+          .closeSession(id)
+          .then(async () => {
+            const remaining = await adapter.terminal.listSessions();
+            if (remaining.length > 0) {
+              setSessions(remaining);
+              if (activeSessionId === id) {
+                setActiveSessionId(remaining[0].id);
+              }
+            } else {
+              const replacement = await adapter.terminal.createSession({
+                title: 'PowerShell',
+                type: 'powershell',
+                workingDir: activeProject.path || undefined,
+              });
+              setSessions([replacement]);
+              setActiveSessionId(replacement.id);
+            }
+          })
+          .catch(() => {});
+        return;
+      }
+
+      setSessions((prev) => {
+        if (prev.length <= 1) return prev;
+        const next = prev.filter((s) => s.id !== id);
+        if (activeSessionId === id && next.length > 0) {
+          setActiveSessionId(next[0].id);
+        }
+        return next;
+      });
+    },
+    [activeProject.path, activeSessionId],
+  );
+
+  // Subscribe active session to live SSE output stream from host
+  useEffect(() => {
+    const adapter = getBackendAdapter();
+    if (
+      adapter.isMock ||
+      connectionStep !== 'connected' ||
+      !device.isOnline ||
+      !activeSessionId ||
+      !adapter.terminal.subscribeSessionStream
+    ) {
       return;
     }
 
-    const newId = `sess-${Date.now()}`;
-    const newSession: TerminalSession = {
-      id: newId,
-      title,
-      type,
-      workingDir: activeProject.path,
-      history: [],
-      buffer: [],
-      isRunning: false,
-    };
-    setSessions((prev) => [...prev, newSession]);
-    setActiveSessionId(newId);
-  }, [activeProject.path]);
-
-  // Close session
-  const closeSession = useCallback((id: string) => {
-    const adapter = getBackendAdapter();
-    if (!adapter.isMock) {
-      adapter.terminal.closeSession(id).catch(() => {});
-    }
-    setSessions((prev) => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter((s) => s.id !== id);
-      if (activeSessionId === id && next.length > 0) {
-        setActiveSessionId(next[0].id);
+    const unsubscribe = adapter.terminal.subscribeSessionStream(activeSessionId, (streamLine) => {
+      if (streamLine.workingDir) {
+        const nextDir = streamLine.workingDir;
+        setSessions((prev) =>
+          prev.map((s) => (s.id === activeSessionId ? { ...s, workingDir: nextDir } : s)),
+        );
       }
-      return next;
+
+      if (!streamLine.content && streamLine.type === 'system') {
+        return;
+      }
+
+      setSessions((prev) =>
+        prev.map((s) => {
+          if (s.id !== activeSessionId) return s;
+          if (s.buffer.some((b) => b.id === streamLine.id)) return s;
+          // The command echo is already appended locally on submit; don't render the host's copy twice
+          if (streamLine.type === 'input') {
+            const lastInput = [...s.buffer].reverse().find((b) => b.type === 'input');
+            if (lastInput && lastInput.content === streamLine.content) return s;
+          }
+          return {
+            ...s,
+            buffer: [
+              ...s.buffer,
+              {
+                id: streamLine.id || `sse-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                type: streamLine.type || 'output',
+                content: streamLine.content,
+                timestamp:
+                  streamLine.timestamp ||
+                  new Date().toLocaleTimeString('en-US', { hour12: false }),
+                isStreaming: true,
+              },
+            ],
+          };
+        }),
+      );
     });
-  }, [activeSessionId]);
+
+    return () => {
+      unsubscribe();
+    };
+  }, [activeSessionId, connectionStep, device.isOnline]);
 
   // Add draft intent directly from offline screen
-  const addDraftIntent = useCallback((cmd: string) => {
-    const trimmed = cmd.trim();
-    if (!trimmed) return;
-    const now = Date.now();
-    const existingDup = intentQueue.find(
-      (e) =>
-        e.command === trimmed &&
-        e.projectName === activeProject.name &&
-        e.status === 'queued' &&
-        Math.abs(now - e.timestamp) < 5000,
-    );
-    if (existingDup) return;
+  const addDraftIntent = useCallback(
+    (cmd: string) => {
+      const trimmed = cmd.trim();
+      if (!trimmed) return;
+      const now = Date.now();
+      const existingDup = intentQueue.find(
+        (e) =>
+          e.command === trimmed &&
+          e.projectName === activeProject.name &&
+          e.status === 'queued' &&
+          Math.abs(now - e.timestamp) < 5000,
+      );
+      if (existingDup) return;
 
-    const nextSeq =
-      intentQueue.length > 0 ? Math.max(...intentQueue.map((i) => i.seq)) + 1 : 1;
-    const newIntent: CommandIntent = {
-      id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
-      seq: nextSeq,
-      command: trimmed,
-      workingDir: activeProject.path,
-      projectName: activeProject.name,
-      timestamp: now,
-      status: 'queued',
-      causalDependencyHash: `sha256:${Math.random().toString(16).substring(2, 10)}`,
-      expectedBaseBranch: activeProject.branch.replace('*', ''),
-      expectedHeadCommit: activeProject.lastCommit.hash,
-    };
+      const nextSeq =
+        intentQueue.length > 0 ? Math.max(...intentQueue.map((i) => i.seq)) + 1 : 1;
+      const newIntent: CommandIntent = {
+        id: `intent-${now}-${Math.random().toString(36).substring(2, 8)}`,
+        seq: nextSeq,
+        command: trimmed,
+        workingDir: activeProject.path,
+        projectName: activeProject.name,
+        timestamp: now,
+        status: 'queued',
+        causalDependencyHash: `sha256:${Math.random().toString(16).substring(2, 10)}`,
+        expectedBaseBranch: activeProject.branch.replace('*', ''),
+        expectedHeadCommit: activeProject.lastCommit.hash,
+      };
 
-    // Persist to IndexedDB offline queue with matching id & seq
-    enqueueIntent(newIntent).catch((err) =>
-      console.warn('[RelayContext] Failed to persist draft intent:', err)
-    );
+      enqueueIntent(newIntent).catch((err) =>
+        console.warn('[RelayContext] Failed to persist draft intent:', err),
+      );
 
-    setIntentQueue((prev) => [...prev, newIntent]);
-  }, [activeProject, intentQueue]);
+      setIntentQueue((prev) => [...prev, newIntent]);
+    },
+    [activeProject, intentQueue],
+  );
 
-  // Scan PC Repositories
+  // Scan PC Repositories using real host endpoint
   const scanPcRepositories = useCallback(async () => {
     setIsScanningPc(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setIsScanningPc(false);
+    try {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock && adapter.workspace) {
+        const res = await adapter.workspace.scanRepositories();
+        if (Array.isArray(res.repositories) && res.repositories.length > 0) {
+          setProjects((prev) => {
+            const merged = [...prev];
+            for (const repo of res.repositories) {
+              if (!merged.some((p) => p.path.toLowerCase() === repo.path.toLowerCase())) {
+                merged.push(workspaceInfoToProject(repo));
+              }
+            }
+            return merged;
+          });
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to scan Windows PC repositories';
+      setFileError(msg);
+    } finally {
+      setIsScanningPc(false);
+    }
   }, []);
 
-  // Install CLI Tool
-  const installCliTool = useCallback(async (cliId: string) => {
-    setCliTools((prev) =>
-      prev.map((t) => (t.id === cliId ? { ...t, status: 'running' } : t))
-    );
-    await new Promise((r) => setTimeout(r, 1400));
-    setCliTools((prev) =>
-      prev.map((t) => (t.id === cliId ? { ...t, status: 'installed', version: 'v1.1.0' } : t))
-    );
-  }, []);
+  // Install / Re-check CLI Tool honestly (no fake setTimeout v1.1.0!)
+  const installCliTool = useCallback(
+    async (cliId: string) => {
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        try {
+          await adapter.cli.installTool(cliId);
+        } catch {
+          // Install may be disabled on host for security; re-probe real installation status
+        }
+        await refreshCliTools();
+        return;
+      }
+      setCliTools((prev) =>
+        prev.map((t) => (t.id === cliId ? { ...t, status: 'installed', version: 'mock' } : t)),
+      );
+    },
+    [refreshCliTools],
+  );
 
-  // Reconcile single intent
+  // Reconcile single intent (explicit user approval required — executes on real host in real mode)
   const reconcileSingleIntent = useCallback(
     async (id: string, action: 'run' | 'skip' | 'cancel') => {
       const intent = intentQueue.find((i) => i.id === id);
@@ -1616,25 +1954,75 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       if (action === 'skip') {
         updateIntentStatus(id, 'skipped').catch(() => {});
         setIntentQueue((prev) =>
-          prev.map((i) => (i.id === id ? { ...i, status: 'skipped' } : i))
+          prev.map((i) => (i.id === id ? { ...i, status: 'skipped' } : i)),
         );
         return;
       }
 
-      // Mark executing
       updateIntentStatus(id, 'executing').catch(() => {});
       setIntentQueue((prev) =>
-        prev.map((i) => (i.id === id ? { ...i, status: 'executing' } : i))
+        prev.map((i) => (i.id === id ? { ...i, status: 'executing' } : i)),
       );
 
-      await new Promise((r) => setTimeout(r, 700));
+      const startedAt = Date.now();
+      const adapter = getBackendAdapter();
+      if (!adapter.isMock) {
+        try {
+          const execRes = await adapter.terminal.executeCommand({
+            sessionId: activeSessionId,
+            command: intent.command,
+            workingDir: intent.workingDir || activeProject.path,
+          });
+          const outText = execRes.lines.map((l) => l.content).join('\n');
+          const duration = Date.now() - startedAt;
+
+          updateIntentStatus(id, 'reconciled', {
+            resultOutput: outText,
+            executionDurationMs: duration,
+          }).catch(() => {});
+
+          setIntentQueue((prev) =>
+            prev.map((i) =>
+              i.id === id
+                ? {
+                    ...i,
+                    status: 'reconciled',
+                    resultOutput: outText,
+                    executionDurationMs: duration,
+                  }
+                : i,
+            ),
+          );
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : 'Host execution failed';
+          const duration = Date.now() - startedAt;
+          updateIntentStatus(id, 'failed', {
+            resultOutput: errMsg,
+            executionDurationMs: duration,
+          }).catch(() => {});
+          setIntentQueue((prev) =>
+            prev.map((i) =>
+              i.id === id
+                ? {
+                    ...i,
+                    status: 'failed',
+                    resultOutput: errMsg,
+                    executionDurationMs: duration,
+                  }
+                : i,
+            ),
+          );
+        }
+        return;
+      }
 
       const res = executeCommandOnDaemon(intent.command, activeProject, installedCliMap);
       const outText = res.lines.map((l) => l.content).join('\n');
+      const duration = Date.now() - startedAt;
 
       updateIntentStatus(id, 'reconciled', {
         resultOutput: outText,
-        executionDurationMs: 420,
+        executionDurationMs: duration,
       }).catch(() => {});
 
       setIntentQueue((prev) =>
@@ -1644,13 +2032,13 @@ export function RelayProvider({ children }: { children: ReactNode }) {
                 ...i,
                 status: 'reconciled',
                 resultOutput: outText,
-                executionDurationMs: 420,
+                executionDurationMs: duration,
               }
-            : i
-        )
+            : i,
+        ),
       );
     },
-    [activeProject, installedCliMap, intentQueue]
+    [activeProject, activeSessionId, installedCliMap, intentQueue],
   );
 
   // Reconcile all intents
@@ -1667,7 +2055,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setDevice((prev) => ({ ...prev, isReconciling: false }));
       }
     },
-    [intentQueue, reconcileSingleIntent]
+    [intentQueue, reconcileSingleIntent],
   );
 
   const clearIntentQueue = useCallback(() => {
@@ -1700,6 +2088,8 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setMobileNav,
         isDrawerOpen,
         setIsDrawerOpen,
+        isWorkspacePickerOpen,
+        setIsWorkspacePickerOpen,
         device,
         setDevice,
         togglePcOnline,
@@ -1707,12 +2097,16 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         projects,
         activeProjectId,
         setActiveProjectId,
+        selectWorkspacePath,
+        browseHostFolders,
+        pickNativeHostFolder,
         activeProject,
         activeFile,
         setActiveFile,
         saveFileContent,
         createFile,
         createFolder,
+        renameProjectFile,
         unsavedFiles,
         setUnsavedDraft,
         clearUnsavedDraft,
@@ -1736,8 +2130,10 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         sendSignal,
         history,
         cliTools,
+        refreshCliTools,
         installCliTool,
         devServers,
+        refreshDevServers,
         isScanningPc,
         scanPcRepositories,
         intentQueue,

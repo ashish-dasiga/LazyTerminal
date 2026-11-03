@@ -6,7 +6,9 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const BUILD_DIR = path.join(PROJECT_ROOT, 'build_android');
 const SDK_DIR = 'C:\\Users\\Ashish Dasiga\\tools\\android-sdk';
 const BUILD_TOOLS = path.join(SDK_DIR, 'build-tools', '34.0.0');
-const ANDROID_JAR = path.join(SDK_DIR, 'platforms', 'android-34-2', 'android.jar');
+const ANDROID_JAR = fs.existsSync(path.join(SDK_DIR, 'platforms', 'android-34', 'android.jar'))
+  ? path.join(SDK_DIR, 'platforms', 'android-34', 'android.jar')
+  : path.join(SDK_DIR, 'platforms', 'android-34-2', 'android.jar');
 const JAVA_BIN = 'C:\\Program Files\\Microsoft\\jdk-17.0.20.101-hotspot\\bin';
 const KEYSTORE = 'C:\\Users\\Ashish Dasiga\\.android\\debug.keystore';
 
@@ -72,6 +74,7 @@ const manifest = `<?xml version="1.0" encoding="utf-8"?>
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="true"
+        android:debuggable="true"
         android:theme="@android:style/Theme.Black.NoTitleBar">
         <activity
             android:name="com.lazyterm.app.MainActivity"
@@ -115,6 +118,8 @@ public class MainActivity extends Activity {
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         );
 
+        WebView.setWebContentsDebuggingEnabled(true);
+
         webView = new WebView(this);
         webView.setBackgroundColor(Color.parseColor("#07080a"));
 
@@ -126,6 +131,7 @@ public class MainActivity extends Activity {
         settings.setAllowContentAccess(true);
         settings.setAllowFileAccessFromFileURLs(true);
         settings.setAllowUniversalAccessFromFileURLs(true);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
         settings.setSupportZoom(false);
@@ -147,7 +153,7 @@ public class MainActivity extends Activity {
         });
 
         setContentView(webView);
-        webView.loadUrl("file:///android_asset/www/index.html");
+        webView.loadUrl("file:///android_asset/www/index.html?view=mobile&source=apk");
     }
 
     @Override
@@ -258,6 +264,7 @@ execSync(`"${apksigner}" verify --verbose "${alignedApk}"`, {
 // 15. Copy output to public/downloads/LazyTerminal.apk
 const targetApk = path.join(PROJECT_ROOT, 'public', 'downloads', 'LazyTerminal.apk');
 const targetDebugApk = path.join(PROJECT_ROOT, 'public', 'downloads', 'lazy-terminal-debug.apk');
+fs.mkdirSync(path.dirname(targetApk), { recursive: true });
 fs.copyFileSync(alignedApk, targetApk);
 fs.copyFileSync(alignedApk, targetDebugApk);
 
