@@ -9,6 +9,8 @@ coverage/
 test-results/
 playwright-report/
 build_android/
+dist-electron/
+dist-installer/
 *.png
 /context/
 *.spec

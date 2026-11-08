@@ -66,7 +66,8 @@ export async function startHostCompanionServer(
     });
   });
 
-  const distPath = path.resolve(currentDirPath, '../../dist');
+  const candidateDistPaths = [path.resolve(currentDirPath, '../../dist'), path.resolve(currentDirPath, '../dist'), path.resolve(currentDirPath, 'dist'), path.resolve(process.cwd(), 'dist'), path.join((process as any).resourcesPath || '', 'app', 'dist')];
+  const distPath = candidateDistPaths.find((p) => p && fs.existsSync(p)) || path.resolve(currentDirPath, '../../dist');
   if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {

@@ -4,62 +4,80 @@ const path = require('path');
 
 const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
+const distElectronDir = path.join(rootDir, 'dist-electron');
+const distInstallerDir = path.join(rootDir, 'dist-installer');
 const publicDownloadsDir = path.join(rootDir, 'public', 'downloads');
 
-if (!fs.existsSync(distDir)) {
-  fs.mkdirSync(distDir, { recursive: true });
+[distDir, distElectronDir, distInstallerDir, publicDownloadsDir].forEach((dir) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
+console.log('============================================================');
+console.log(' Lazy Terminal — Packaging Windows Desktop Application');
+console.log('============================================================\n');
+
+// 1. Build Vite production bundle
+console.log('[1/4] Building production React frontend with Vite...');
+execSync('npm run build', { cwd: rootDir, stdio: 'inherit' });
+
+// 2. Bundle Host Companion server
+console.log('\n[2/4] Bundling Host Companion backend with esbuild...');
+execSync(
+  'npx esbuild src/host/companionServer.ts --bundle --platform=node --format=cjs --outfile=dist-electron/companionServer.cjs --external:electron',
+  { cwd: rootDir, stdio: 'inherit' }
+);
+
+// Copy Electron desktop files
+fs.copyFileSync(
+  path.join(rootDir, 'src', 'desktop', 'main.cjs'),
+  path.join(distElectronDir, 'main.cjs')
+);
+fs.copyFileSync(
+  path.join(rootDir, 'src', 'desktop', 'preload.cjs'),
+  path.join(distElectronDir, 'preload.cjs')
+);
+if (fs.existsSync(path.join(publicDownloadsDir, 'app_icon.ico'))) {
+  fs.copyFileSync(
+    path.join(publicDownloadsDir, 'app_icon.ico'),
+    path.join(distElectronDir, 'app_icon.ico')
+  );
 }
-if (!fs.existsSync(publicDownloadsDir)) {
-  fs.mkdirSync(publicDownloadsDir, { recursive: true });
+
+// 3. Package Windows desktop application and NSIS installer with electron-builder
+console.log('\n[3/4] Building standalone Windows Desktop Executable & NSIS Setup Wizard...');
+execSync('npx electron-builder --win --x64', {
+  cwd: rootDir,
+  stdio: 'inherit',
+});
+
+// 4. Verify deliverables and publish to public/downloads
+console.log('\n[4/4] Verifying generated installer and standalone executable...');
+const installerSrc = path.join(distInstallerDir, 'LazyTerminal-Windows-Setup.exe');
+const installerDest = path.join(publicDownloadsDir, 'LazyTerminal-Windows-Setup.exe');
+
+if (fs.existsSync(installerSrc)) {
+  fs.copyFileSync(installerSrc, installerDest);
+  const sizeMb = (fs.statSync(installerDest).size / (1024 * 1024)).toFixed(2);
+  console.log(`✓ Windows NSIS Installer ready: ${installerDest} (${sizeMb} MB)`);
+} else {
+  // Check for any .exe in distInstallerDir
+  const exes = fs.readdirSync(distInstallerDir).filter((f) => f.endsWith('.exe'));
+  if (exes.length > 0) {
+    const src = path.join(distInstallerDir, exes[0]);
+    fs.copyFileSync(src, installerDest);
+    console.log(`✓ Copied ${exes[0]} -> ${installerDest}`);
+  } else {
+    throw new Error('No installer .exe found in dist-installer directory!');
+  }
 }
 
-console.log('[build_windows_exe] 1/4 Bundling host companion with esbuild...');
-execSync('npx esbuild src/host/companionServer.ts --bundle --platform=node --format=cjs --outfile=dist/companionServer.cjs', {
-  cwd: rootDir,
-  stdio: 'inherit'
-});
+const unpackedExe = path.join(distInstallerDir, 'win-unpacked', 'Lazy Terminal.exe');
+if (fs.existsSync(unpackedExe)) {
+  console.log(`✓ Standalone Windows Desktop App ready: ${unpackedExe}`);
+}
 
-const seaConfig = {
-  main: 'dist/companionServer.cjs',
-  output: 'dist/sea-prep.blob',
-  disableExperimentalSEAWarning: true
-};
-fs.writeFileSync(path.join(distDir, 'sea-config.json'), JSON.stringify(seaConfig, null, 2), 'utf8');
-
-console.log('[build_windows_exe] 2/4 Generating SEA preparation blob...');
-execSync('node --experimental-sea-config dist/sea-config.json', {
-  cwd: rootDir,
-  stdio: 'inherit'
-});
-
-const nodePath = process.execPath;
-const targetHostExe = path.join(distDir, 'LazyTerminal-Windows-Host.exe');
-console.log(`[build_windows_exe] Copying Node base to ${targetHostExe}...`);
-fs.copyFileSync(nodePath, targetHostExe);
-
-console.log('[build_windows_exe] 3/4 Injecting SEA blob into Host engine executable...');
-execSync(`npx --yes postject "${targetHostExe}" NODE_SEA_BLOB dist/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`, {
-  cwd: rootDir,
-  stdio: 'inherit'
-});
-
-const publicHostExe = path.join(publicDownloadsDir, 'LazyTerminal-Windows-Host.exe');
-fs.copyFileSync(targetHostExe, publicHostExe);
-console.log(`[build_windows_exe] Host engine binary ready: ${publicHostExe} (${(fs.statSync(publicHostExe).size / (1024 * 1024)).toFixed(1)} MB)`);
-
-console.log('[build_windows_exe] 4/4 Compiling Native Windows Desktop GUI Window (WPF) with csc.exe...');
-const wpfDir = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\WPF';
-const cscPath = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
-const targetGuiExe = path.join(distDir, 'LazyTerminal-Windows-Setup.exe');
-const sourceCs = path.join(rootDir, 'src', 'windows', 'LazyTerminalHostWindow.cs');
-const iconPath = path.join(publicDownloadsDir, 'app_icon.ico');
-
-const compileCmd = `"${cscPath}" /target:winexe "/r:${wpfDir}\\PresentationFramework.dll" "/r:${wpfDir}\\PresentationCore.dll" "/r:${wpfDir}\\WindowsBase.dll" /r:System.Xaml.dll /r:System.Drawing.dll /win32icon:"${iconPath}" /out:"${targetGuiExe}" "${sourceCs}"`;
-execSync(compileCmd, {
-  cwd: rootDir,
-  stdio: 'inherit'
-});
-
-const publicGuiExe = path.join(publicDownloadsDir, 'LazyTerminal-Windows-Setup.exe');
-fs.copyFileSync(targetGuiExe, publicGuiExe);
-console.log(`[build_windows_exe] Native Desktop GUI Window ready: ${publicGuiExe} (${(fs.statSync(publicGuiExe).size / 1024).toFixed(1)} KB)`);
+console.log('\n============================================================');
+console.log(' Lazy Terminal Windows Desktop Packaging Complete!');
+console.log('============================================================\n');
