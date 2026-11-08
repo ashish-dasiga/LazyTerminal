@@ -25,7 +25,7 @@ test('Real Backend Pairing Integration — Full Lifecycle over HTTP', async (t) 
   });
 
   await t.test('1. Server starts and generates live random pairing key', async () => {
-    const keyInfo = await adapter.connection.fetchActiveHostKey();
+    const keyInfo = await adapter.connection.fetchActiveHostKey!();
     assert.ok(keyInfo.pairingKey, 'Active pairing key must be present');
     assert.match(keyInfo.pairingKey, /^\d{3}-\d{3}$/, 'Pairing key must follow 6-digit xxx-xxx format');
   });
@@ -44,7 +44,7 @@ test('Real Backend Pairing Integration — Full Lifecycle over HTTP', async (t) 
   });
 
   await t.test('3. Connects with live pairing key and receives real session token', async () => {
-    const activeKeyInfo = await adapter.connection.fetchActiveHostKey();
+    const activeKeyInfo = await adapter.connection.fetchActiveHostKey!();
     const connectRes = await adapter.connection.connectToHost({ pairingKey: activeKeyInfo.pairingKey });
     assert.equal(connectRes.success, true, 'Valid pairing key must succeed');
     assert.ok(connectRes.sessionToken, 'Real session token must be returned');

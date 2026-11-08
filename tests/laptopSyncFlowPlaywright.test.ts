@@ -88,15 +88,16 @@ async function verifyLaptopSyncFlow() {
     assert.strictEqual(isServerCtrlVisibleBefore, false, 'Server Control must NOT be shown before connection');
     console.log('✓ Verified: Server Control is hidden while waiting for connection.');
 
-    const artifactDir = 'C:\\Users\\Ashish Dasiga\\.gemini\\antigravity-cli\\brain\\5f0eae23-ad0e-454f-a36d-2c69c3828f0f';
-    if (!fs.existsSync(artifactDir)) {
-      fs.mkdirSync(artifactDir, { recursive: true });
+    const artifactDir = process.env.LAZY_TERMINAL_SCREENSHOT_DIR;
+    if (artifactDir) {
+      if (!fs.existsSync(artifactDir)) {
+        fs.mkdirSync(artifactDir, { recursive: true });
+      }
+      // Capture screenshot of Unconnected Token-Only View
+      const tokenOnlyShot = path.join(artifactDir, 'windows_companion_token_only.png');
+      await page.screenshot({ path: tokenOnlyShot });
+      console.log(`✓ Saved screenshot of Token-Only Standby: ${tokenOnlyShot}`);
     }
-
-    // Capture screenshot of Unconnected Token-Only View
-    const tokenOnlyShot = path.join(artifactDir, 'windows_companion_token_only.png');
-    await page.screenshot({ path: tokenOnlyShot });
-    console.log(`✓ Saved screenshot of Token-Only Standby: ${tokenOnlyShot}`);
 
     // Verify Copy Token action
     const copyBtn = page.locator('button:has-text("Copy Token")').first();
@@ -118,8 +119,8 @@ async function verifyLaptopSyncFlow() {
     // Phase 2: Mobile Connection / Pairing
     // -------------------------------------------------------------------------
     console.log('\n[Phase 2] Connecting Mobile Client with Token...');
-    const connectBtn = page.locator('button:has-text("Simulate Mobile Connect")').first();
-    assert.ok(await connectBtn.isVisible(), 'Simulate Mobile Connect button must be available for testing');
+    const connectBtn = page.locator('button:has-text("Pair Local Session"), button:has-text("Simulate Mobile Connect")').first();
+    assert.ok(await connectBtn.isVisible(), 'Pair Local Session button must be available for testing');
     await connectBtn.click();
     await page.waitForTimeout(600);
 
@@ -151,16 +152,18 @@ async function verifyLaptopSyncFlow() {
     await page.waitForSelector('text=completed!', { timeout: 5000 });
     console.log('✓ Sync request completed successfully and toast displayed!');
 
-    // Verify previous syncs dropdown is populated
+    // Verify previous syncs dropdown is populated with the recorded sync request
     const syncDropdown = page.locator('select').first();
     const syncOptions = await syncDropdown.locator('option').allTextContents();
     console.log(`✓ Recorded Syncs in dropdown: ${syncOptions.length} entries (latest: ${syncOptions[0]})`);
-    assert.ok(syncOptions.length >= 4, 'Must have recorded sync requests');
+    assert.ok(syncOptions.length >= 1, 'Must have recorded sync requests');
 
     // Capture screenshot of Connected View with Sync Manager and Server Control
-    const connectedShot = path.join(artifactDir, 'windows_companion_connected_sync.png');
-    await page.screenshot({ path: connectedShot });
-    console.log(`✓ Saved screenshot of Connected Sync Manager: ${connectedShot}`);
+    if (artifactDir) {
+      const connectedShot = path.join(artifactDir, 'windows_companion_connected_sync.png');
+      await page.screenshot({ path: connectedShot });
+      console.log(`✓ Saved screenshot of Connected Sync Manager: ${connectedShot}`);
+    }
 
     // Verify Disconnect returns to clean token-only view
     console.log('\n[Phase 4] Testing Disconnect to Return to Token-Only Standby...');

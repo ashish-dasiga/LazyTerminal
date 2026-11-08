@@ -85,7 +85,7 @@ export async function inspectWorkspaceInfo(folderPath: string): Promise<Workspac
   let lastCommitMsg = 'Local Windows folder (no Git repository)';
 
   try {
-    const topLevel = await runExecFile('git', ['rev-parse', '--show-toplevel'], resolved, 2500);
+    const topLevel = await runExecFile('git', ['rev-parse', '--show-toplevel'], resolved, 2500, { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(resolved) });
     if (topLevel) {
       isGitRepo = true;
       gitRoot = path.resolve(topLevel);

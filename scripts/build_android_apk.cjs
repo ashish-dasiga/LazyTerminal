@@ -4,13 +4,14 @@ const { execSync } = require('child_process');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const BUILD_DIR = path.join(PROJECT_ROOT, 'build_android');
-const SDK_DIR = 'C:\\Users\\Ashish Dasiga\\tools\\android-sdk';
+const userHome = process.env.USERPROFILE || process.env.HOME || 'C:\\Users\\Default';
+const SDK_DIR = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || path.join(userHome, 'tools', 'android-sdk');
 const BUILD_TOOLS = path.join(SDK_DIR, 'build-tools', '34.0.0');
 const ANDROID_JAR = fs.existsSync(path.join(SDK_DIR, 'platforms', 'android-34', 'android.jar'))
   ? path.join(SDK_DIR, 'platforms', 'android-34', 'android.jar')
   : path.join(SDK_DIR, 'platforms', 'android-34-2', 'android.jar');
-const JAVA_BIN = 'C:\\Program Files\\Microsoft\\jdk-17.0.20.101-hotspot\\bin';
-const KEYSTORE = 'C:\\Users\\Ashish Dasiga\\.android\\debug.keystore';
+const JAVA_BIN = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin') : 'C:\\Program Files\\Microsoft\\jdk-17.0.20.101-hotspot\\bin';
+const KEYSTORE = path.join(userHome, '.android', 'debug.keystore');
 
 const aapt2 = path.join(BUILD_TOOLS, 'aapt2.exe');
 const d8 = path.join(BUILD_TOOLS, 'd8.bat');

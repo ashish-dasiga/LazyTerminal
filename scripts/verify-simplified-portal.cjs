@@ -72,16 +72,20 @@ async function testSimplifiedPortal() {
     console.log(`EXE Size: ${exeStats.size} bytes (${(exeStats.size / 1024).toFixed(1)} KB)`);
     assert.ok(exeStats.size > 10000, 'EXE must be a real PE executable (> 10KB)');
 
-    // Capture screenshots for design review
-    const screenshotDesktop = path.join('C:\\Users\\Ashish Dasiga\\.gemini\\antigravity-cli\\brain\\91de9501-3fb7-4ce7-9630-6b4aa46f630a', 'simplified_portal_desktop.png');
-    await page.screenshot({ path: screenshotDesktop, fullPage: true });
-    console.log(`Saved desktop screenshot: ${screenshotDesktop}`);
+    // Capture screenshots if directory configured
+    const screenshotDir = process.env.LAZY_TERMINAL_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      const screenshotDesktop = path.join(screenshotDir, 'simplified_portal_desktop.png');
+      await page.screenshot({ path: screenshotDesktop, fullPage: true });
+      console.log(`Saved desktop screenshot: ${screenshotDesktop}`);
 
-    // Mobile Viewport Screenshot
-    await page.setViewportSize({ width: 390, height: 844 });
-    const screenshotMobile = path.join('C:\\Users\\Ashish Dasiga\\.gemini\\antigravity-cli\\brain\\91de9501-3fb7-4ce7-9630-6b4aa46f630a', 'simplified_portal_mobile.png');
-    await page.screenshot({ path: screenshotMobile, fullPage: true });
-    console.log(`Saved mobile screenshot: ${screenshotMobile}`);
+      // Mobile Viewport Screenshot
+      await page.setViewportSize({ width: 390, height: 844 });
+      const screenshotMobile = path.join(screenshotDir, 'simplified_portal_mobile.png');
+      await page.screenshot({ path: screenshotMobile, fullPage: true });
+      console.log(`Saved mobile screenshot: ${screenshotMobile}`);
+    }
 
     console.log('\n--- ALL VERIFICATION CHECKS PASSED SUCCESSFULLY ---');
   } finally {

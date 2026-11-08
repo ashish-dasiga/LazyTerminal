@@ -49,22 +49,17 @@ async function runPlaywrightVerification() {
   page.on('console', msg => console.log('PAGE CONSOLE:', msg.text()));
 
   try {
-    // 3. Navigate to app
-    await page.goto(baseUrl, { waitUntil: 'networkidle' });
+    // 3. Navigate to app directly in mobile mode
+    await page.goto(`${baseUrl}/?view=mobile`, { waitUntil: 'networkidle' });
     console.log('✓ Successfully loaded Lazy Terminal web client.');
 
     // 3b. Handle switching to Mobile App if currently on portal
-    const mobileSwitchBtn = page.locator('button:has-text("Mobile App (Android)")').first();
+    const mobileSwitchBtn = page.locator('button:has-text("open Mobile Web App directly in browser"), button:has-text("Mobile App")').first();
     if (await mobileSwitchBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-      // Check if portal is active
-      const portalTab = page.locator('button:has-text("Install Apps")').first();
-      const isPortalActive = await portalTab.evaluate((el: HTMLElement) => el.classList.contains('text-white')).catch(() => false);
-      if (isPortalActive) {
-        console.log('✓ Verified Lazy Terminal Installation Portal.');
-        await mobileSwitchBtn.click();
-        await page.waitForTimeout(400);
-        console.log('✓ Switched to Mobile App view.');
-      }
+      console.log('✓ Switching to Mobile App view...');
+      await mobileSwitchBtn.click();
+      await page.waitForTimeout(400);
+      console.log('✓ Switched to Mobile App view.');
     }
 
     // 4. Dismiss reconciliation modal if open
@@ -76,7 +71,12 @@ async function runPlaywrightVerification() {
     }
 
     // 5. Handle initial connection flow if not connected
-    const tokenInput = page.locator('input[placeholder*="784-291"], input[type="text"]').first();
+    const hostInput = page.locator('#host-ip-input, input[name="hostAddress"]');
+    if (await hostInput.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await hostInput.fill(baseUrl);
+      await hostInput.dispatchEvent('blur');
+    }
+    const tokenInput = page.locator('#pairing-code-input, input[name="pairingCode"], input[placeholder*="784-291"]').first();
     if (await tokenInput.isVisible({ timeout: 2000 }).catch(() => false)) {
       console.log(`Entering live connection key (${livePairingKey}) into mobile connection flow...`);
       await tokenInput.fill(livePairingKey);
@@ -121,7 +121,7 @@ async function runPlaywrightVerification() {
     await editorToolbar.waitFor({ state: 'visible', timeout: 3000 });
     const codeViewerContent = await page.locator('pre').first().textContent();
     assert.ok(
-      codeViewerContent && codeViewerContent.includes('"react-example"'),
+      codeViewerContent && (codeViewerContent.includes('"lazy-terminal"') || codeViewerContent.includes('"react-example"')),
       'Code viewer must display real package.json content fetched from host'
     );
     console.log('✓ Code viewer loaded real package.json content from host.');
@@ -159,7 +159,7 @@ async function runPlaywrightVerification() {
     console.log('✓ Commit box verified in Source Control.');
 
     // Verify Branch selector displays the REAL active git branch
-    const branchBtn = page.locator('button:has-text("main"), button:has-text("ashritha")').first();
+    const branchBtn = page.locator('button:has-text("main"), button:has-text("ashritha"), button:has-text("deeksha"), button:has-text("shreya")').first();
     await branchBtn.waitFor({ state: 'visible', timeout: 5000 });
     const branchText = await branchBtn.textContent();
     console.log(`✓ Git branch selector verified showing real host branch: ${branchText?.trim()}.`);

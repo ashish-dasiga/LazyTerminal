@@ -115,11 +115,16 @@ async function runMobilePairingRedesignSuite() {
     await pairingInput.click();
     console.log('✓ Verified: Decorative background logo is non-blocking and input is fully interactable.');
 
-    // Save proof screenshot of the redesigned mobile pairing screen
-    const artifactDir = 'C:\\Users\\Ashish Dasiga\\.gemini\\antigravity-cli\\brain\\5f0eae23-ad0e-454f-a36d-2c69c3828f0f';
-    const screenshotPath = path.join(artifactDir, 'mobile_pairing_redesigned.png');
-    await page.screenshot({ path: screenshotPath });
-    console.log(`✓ Saved screenshot of redesigned mobile pairing screen: ${screenshotPath}`);
+    // Save proof screenshot if screenshot directory configured
+    const artifactDir = process.env.LAZY_TERMINAL_SCREENSHOT_DIR;
+    if (artifactDir) {
+      if (!fs.existsSync(artifactDir)) {
+        fs.mkdirSync(artifactDir, { recursive: true });
+      }
+      const screenshotPath = path.join(artifactDir, 'mobile_pairing_redesigned.png');
+      await page.screenshot({ path: screenshotPath });
+      console.log(`✓ Saved screenshot of redesigned mobile pairing screen: ${screenshotPath}`);
+    }
 
     // -------------------------------------------------------------------------
     // Test Category 2: Validation and Connection

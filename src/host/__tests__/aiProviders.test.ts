@@ -46,7 +46,7 @@ describe('Real AI CLI Providers — Windows Spawn, Auth Probe, and Live Sessions
       await hostServer.close();
     }
     if (tempWorkspace && fs.existsSync(tempWorkspace)) {
-      fs.rmSync(tempWorkspace, { recursive: true, force: true });
+      try { fs.rmSync(tempWorkspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {}
     }
   });
 

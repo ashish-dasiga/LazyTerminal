@@ -12,12 +12,12 @@ import {
 
 export const gitRouter = Router();
 
-function runGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+function runGit(args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       args,
-      { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true },
+      { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true, env: { ...process.env, ...env } },
       (error, stdout, stderr) => {
         if (error) {
           reject(Object.assign(error, { stdout, stderr }));
@@ -31,7 +31,7 @@ function runGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: 
 
 async function resolveGitRoot(repoPath: string): Promise<string | null> {
   try {
-    const { stdout } = await runGit(['rev-parse', '--show-toplevel'], repoPath);
+    const { stdout } = await runGit(['rev-parse', '--show-toplevel'], repoPath, { GIT_CEILING_DIRECTORIES: path.dirname(repoPath) });
     return stdout ? path.resolve(stdout) : null;
   } catch {
     return null;

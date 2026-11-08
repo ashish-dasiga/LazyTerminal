@@ -50,7 +50,7 @@ async function runPlaywrightAppsVerification() {
     await page.goto(`${baseUrl}/?view=laptop`, { waitUntil: 'networkidle' });
 
     // Verify Windows Laptop App is loaded
-    await page.waitForSelector('text=DESKTOP-WIN11-PRO', { timeout: 5000 });
+    await page.waitForSelector('text=Relay Desktop Host', { timeout: 5000 });
     console.log('✓ Windows Laptop App is active.');
 
     // Find the current displayed token on Windows
@@ -78,14 +78,19 @@ async function runPlaywrightAppsVerification() {
     await page.goto(`${baseUrl}/?view=mobile`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(500);
 
-    // If connection screen is visible, fill token and validate
-    const tokenInput = page.locator('input[aria-label="Pairing Code"], input[type="text"]').first();
+    // If connection screen is visible, fill host and token and validate
+    const hostInput = page.locator('#host-ip-input, input[name="hostAddress"]');
+    if (await hostInput.isVisible({ timeout: 1500 }).catch(() => false)) {
+      await hostInput.fill(baseUrl);
+      await hostInput.dispatchEvent('blur');
+    }
+    const tokenInput = page.locator('#pairing-code-input, input[name="pairingCode"], input[aria-label="Pairing Code"]').first();
     if (await tokenInput.isVisible({ timeout: 2000 }).catch(() => false)) {
       await tokenInput.fill(tokenAfter || initialHostKey);
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(300);
       const connectBtn = page.locator('button:has-text("Connect to PC"), button[type="submit"]').first();
       await connectBtn.click();
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(1000);
     }
 
     // Dismiss any post-connect reconciliation modal
@@ -161,7 +166,7 @@ async function runPlaywrightAppsVerification() {
     await passInput.fill('secretAccessKey123');
 
     // Submit Sign In Form
-    const submitSignInBtn = page.locator('button[type="submit"]:has-text("Sign In")').first();
+    const submitSignInBtn = page.locator('button[type="submit"]:has-text("Authenticate"), button[type="submit"]:has-text("Sign In"), button[type="submit"]').first();
     await submitSignInBtn.click();
     await page.waitForTimeout(800);
 
@@ -194,7 +199,7 @@ async function runPlaywrightAppsVerification() {
     assert.strictEqual(apkHref, '/downloads/LazyTerminal.apk');
 
     // Verify official app icon (/icon.jpeg) is displayed on portal
-    const portalIcon = page.locator('img[src="/icon.jpeg"]').first();
+    const portalIcon = page.locator('img[src*="icon.jpeg"], img[alt="Lazy Terminal Icon"]').first();
     assert.ok(await portalIcon.isVisible(), 'Official icon.jpeg must be rendered on the install site');
 
     // Verify physical download files exist on the server with non-zero size
